@@ -157,7 +157,7 @@ bool FPurposeEvaluationThread::SelectPurposeIfPossible(FPotentialPurposes& purpo
 				, subjectCombination.subjects.Contains(ESubject::Candidate) ? *subjectCombination.subjects[ESubject::Candidate].GetObject()->GetFullGroupName(false) : TEXT("Invalid")
 				, *potentialPurpose.descriptionOfPurpose
 				, finalScore
-				, subjectCombination.subjects.Contains(ESubject::Candidate) ? *subjectCombination.subjects[ESubject::Instigator].GetObject()->GetFullGroupName(false) : TEXT("Unknown")
+				, subjectCombination.subjects.Contains(ESubject::Instigator) ? *subjectCombination.subjects[ESubject::Instigator].GetObject()->GetFullGroupName(false) : TEXT("Unknown")
 				, subjectCombination.subjects.Contains(ESubject::ObjectiveTarget) ? *FString::Printf(TEXT("ObjectiveTarget %s"), *subjectCombination.subjects[ESubject::ObjectiveTarget].GetObject()->GetFullGroupName(false))
 				: subjectCombination.subjects.Contains(ESubject::EventTarget) ? *FString::Printf(TEXT("ObjectiveTarget %s"), *subjectCombination.subjects[ESubject::EventTarget].GetObject()->GetFullGroupName(false))
 				: TEXT("Unknown Target")
