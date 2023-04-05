@@ -193,6 +193,8 @@ bool FPurposeEvaluationThread::SelectPurposeIfPossible(FPotentialPurposes& purpo
 			, purposeToEvaluate.DescriptionOfParentPurpose /// This is how we create a chain of purpose names for log debugging purposes
 			, purposeToEvaluate.uniqueIdentifierOfParent /// If the FPotentialPurposes had a parent, we need to ensure we pass that ID along to the context
 		);
+		
+		context.cachedScoreOfPurpose = highScore;
 
 		/// We want to check if this potential purpose is already an active purpose
 		/// We allow purposes to evaluate prior to a similarity check so as not to affect the scoring process
