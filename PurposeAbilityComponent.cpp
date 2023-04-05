@@ -364,16 +364,12 @@ bool UPurposeAbilityComponent::ProvidePurposeToOwner(const FContextData& purpose
 				, *purposeToStore.GetPurposeChainName()
 			);
 
-			purposeToStore.AdjustDataIfPossible(purposeToStore.purpose.DataAdjustments(), EPurposeSelectionEvent::OnSelected, OBJECTIVE, "ProvidePurposeToOwner", this);
-
 			EndCurrentObjective();/// Explicitly pass the previous Objective, to ensure avoiding any chance of ending new Objective
 
 			SetCurrentObjective(purposeToStore);///Set the current objective of the actor
 			return true;
 		break;
 		case (int)EPurposeLayer::Behavior:
-
-			purposeToStore.AdjustDataIfPossible(purposeToStore.purpose.DataAdjustments(), EPurposeSelectionEvent::OnSelected, BEHAVIOR, "ProvidePurposeToOwner", this);
 
 			TObjectPtr<UBehavior_AI> behavior = GetBehaviorAtAddress(purposeToStore.addressOfPurpose);
 
