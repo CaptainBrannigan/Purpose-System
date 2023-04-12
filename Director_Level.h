@@ -6,22 +6,44 @@
 #include "Net/UnrealNetwork.h"
 #include "GameFramework/Actor.h"
 #include "GlobalLog.h"
-#include "Purpose/Context/ContextData.h"
 #include "Purpose/PurposeEvaluationThread.h"
 #include "HAL/Runnable.h"
 #include "HAL/RunnableThread.h"
-#include "DataMapInterface.h"
 #include "AISpawn.h"
 #include "Engine/AssetManager.h"
 #include "Director_Level.generated.h"
 
-UCLASS(NotPlaceable)
+
+USTRUCT(BlueprintType)
+//
+struct FAISpawnEntry
+{
+	GENERATED_BODY()
+
+	FAISpawnEntry()
+	{
+	}
+	
+	FAISpawnEntry(TWeakObjectPtr<AAISpawner> inSpawner)
+		: spawner(inSpawner)
+	{
+	}
+
+	UPROPERTY()
+	TWeakObjectPtr<AAISpawner> spawner = nullptr;
+
+	UPROPERTY()
+	///Time in seconds from beginning of level when AI were spawned
+	int spawnTime = 0;
+};
+
+UCLASS()
 /// <summary>
 ///The Level Director is responsible for high level actor management
 ///They will establish managers
 ///They will control the event system
 /// </summary>
-class ADirector_Level : public AActor, public IDataMapInterface, public IPurposeManagementInterface
+class LYRAGAME_API ADirector_Level : public AActor
 {
 	GENERATED_BODY()
 	
@@ -29,114 +51,40 @@ public:
 	// Sets default values for this actor's properties
 	ADirector_Level();
 
+	/// Used in place of EndPlay so that we can ensure the PurposeThreads and any Async tasks that hold Rooted ContextDatas are correctly disposed of
+	virtual void SafelyShutdownGame(TObjectPtr<APlayerController> inPlayer);
 protected:
 	// Called when the game starts or when spawned
 	virtual void BeginPlay() override;
 
+	// Called every frame
+	virtual void Tick(float DeltaTime) override;
 
-private:
+	virtual void BeginDestroy() override;
 
-	UPROPERTY(Replicated)
-	/// This data is not currently and may never be utilized
-	TArray<FDataMapEntry> data;
+	/// To be called by a timer delegate
+	/// Can't pass UKismetLibrary::QuitGame to a FTimerDelegate::BindStatic() because it requires a const pointer, which Iguess doesn't work with delegates
+	void DirectorLatentSafeShutdown(TObjectPtr<APlayerController> inPlayer);
+public:	
 
-	/// Force implementers to provide an editable datamap
-	/// The only way to the change the DataMap is through the Server RPCs
-	TArray<FDataMapEntry>& DataMapInternal() final { return data; }
-
-	UPROPERTY(Replicated)
-	/// Level Directors are responsible for providing managers with Event direction from within their level
-	TArray<TObjectPtr<class AManager>> managers;
-
-	UPROPERTY(VisibleAnywhere)
-	/// Each client level director requires a reference to the client's Manager
-	/// This allows each client to maintain a manager as well as allows the Server to tell clients to run logic on their own manager
-	TArray<TObjectPtr<class AManager_Player>> playerManagers;
+	///AISpawners placed in level will seek the level director, and provide "spawnData"
+	///AISpawners will be responsible for spawning both managers, and providing those managers with spawnData for AI
+	//void Spawn(const TArray<FAISpawnParameters>& spawnData) final;
 
 #pragma region Event System
 public:
 
-	/// Used in order to reference up the management chain to the owner of Events and Backgrounds threads
-	TScriptInterface<IPurposeManagementInterface> GetHeadOfPurposeManagment() final { return this; }
-
-	/// @return TScriptInterface<IPurposeManagementInterface>: Returns the immediate purpose manager above caller
-	TScriptInterface<IPurposeManagementInterface> GetPurposeSuperior() final { return this; }
-
-	TArray<FPurposeEvaluationThread*> GetBackgroundPurposeThreads() final;
-
-	TArray<TScriptInterface<IDataMapInterface>> GetCandidatesForSubPurposeSelection(const int PurposeLayerForUniqueSubjects) final;
-
-	/// @param PurposeLayerForUniqueSubjects: Represents the purpose layer for which the PurposeOwner is meant to create new FUniqueSubjectMaps
-	/// @param parentContext:
-	/// @param candidate: This is the primary subject that will be combined with other subjects as needed for purpose selection
-	/// @return TArray<FSubjectMap>: Each entry is a combination of the candidate and whatever other subjects required for the subpurpose indicated by addressOfSubPurpose
-	virtual TArray<FSubjectMap> GetUniqueSubjectsRequiredForSubPurposeSelection(const int PurposeLayerForUniqueSubjects, const FContextData& parentContext, TScriptInterface<IDataMapInterface> candidate, FPurposeAddress addressOfSubPurpose) override;
-
-	bool ProvidePurposeToOwner(const FContextData& purposeToStore) final;
-
-	/// Events must be stored globally for the duration of a game so that they may have a consistent PurposeAddress
-	TArray<FPurpose> GetEventAssets() final;
-
-	/// As FPurpose can not hold an variable or TArray<> of itself, we're forced to workaround simply accessing subpurposes
-	TArray<FPurpose> GetSubPurposesFor(FPurposeAddress address) final;
-
-	/// When a purpose is put up for selection, but it appears to be a duplicate of a current purpose, we want to let the purpose owner handle the reoccurrence
-	void PurposeReOccurrence(const FPurposeAddress addressOfPurpose, const int64 uniqueIDofActivePurpose) final;
-
-	/// @param uniqueIdentifierOfContextTree: This ID unique to a series of context datas starting with Event allows separation of same purposes for different contexts
-	/// @param fullAddress: Tying the address to the unique ID is how we can search stored contexts for the relevant context we seek
-	/// @param layerToRetrieveFor: We may not necessarily wish to find the end address of the fullAddress, so we can indicate a layer to seek out
-	/// @return FContextData&: Need to check for validity as the context data may not have been found and an empty struct returned
-	FContextData& GetStoredPurpose(const int64 uniqueIdentifierOfContextTree, const FPurposeAddress& fullAddress, const int layerToRetrieveFor) final;
-
-	/// @param parentAddress: An address which is either that of a purpose containing behaviors so that it may reference the parent, or the parent address itself
-	/// @param TArray<TObjectPtr<UGA_Behavior>>: All the behaviors contained by the parent indicated
-	TArray<TObjectPtr<class UBehavior_AI>> GetBehaviorsFromParent(const FPurposeAddress& parentAddress) final;
-
-	/// @param parentAddress: An address of the behavior containing purpose
-	/// @param TObjectPtr<UGA_Behavior>: The behavior contained by the address provided
-	TObjectPtr<class UBehavior_AI> GetBehaviorAtAddress(const FPurposeAddress& inAddress) final;
-
-	///@return bool: True when the Target+Action are the same
-	bool DoesPurposeAlreadyExist(const FContextData& primary, const FSubjectMap& secondarySubjects, const TArray<FDataMapEntry>& secondaryContext, const FPurposeAddress optionalAddress = FPurposeAddress()) final;
-
-	void SubPurposeCompleted(const int64& uniqueContextID, const FPurposeAddress& addressOfPurpose);
-
-	void AllSubPurposesComplete(const int64& uniqueContextID, const FPurposeAddress& addressOfPurpose);
-
-
-	/// As purposes of FContextData are stored as FPurpose, we have no reference to sub purposes or what they actually are
-	///@return TArray<FTaskLayer>: So we trace the address from Event to the Objective and return it's sub tasks
-	TArray<FTaskLayer> GetTasksOfObjective(const FPurposeAddress& address);
-
-	/// As purposes of FContextData are stored as FPurpose, we have no reference to sub purposes or what they actually are
-	///@return TArray<FTaskLayer>: So we trace the address from Event to the Objective and return it's sub tasks
-	bool GetGoalLayer(const FPurposeAddress& address, FGoalLayer& outGoal);
-	
-	/// As purposes of FContextData are stored as FPurpose, we have no reference to sub purposes or what they actually are
-	///@return TArray<FTaskLayer>: So we trace the address from Event to the Objective and return it's sub tasks
-	bool GetEventLayer(const FPurposeAddress& address, FEventLayer& outEvent);
-
 	void EventAssetsLoaded();
-
-	void GoalComplete(const int64& uniqueContextID, const FPurposeAddress& addressOfGoal);
 
 	/// Director will seek out any activities within a level on BeginPlay
 	/// These activities will be stored alongside other Events and also stored as an active Event
 	/// They are essentially the first Occurrences
 	void SeekActivitiesInLevel();
 
-
-
 protected:
 
-	/// Stored as a copy since the background threads are who create the context data
-	/// So long as we have purpose address and unique context ids, it's not a big deal. Each context data is pretty data lightweight
-	TArray<FContextData> eventsActive;
-
-	/// Stored as a copy because FEventLayer can come from any source potentially, from UDataAsset to AActor
-	/// They aren't important, only the chain of purpose and their Conditions are
-	TArray<FEventLayer> eventCacheForPurposeSystem;
+	UPROPERTY(VisibleAnywhere)
+	TArray<FPurpose> eventCacheForPurposeSystem;
 
 private:
 
@@ -149,16 +97,16 @@ private:
 	bool StopThreads() { return stopThreads; }
 
 	///Container for the background purpose selection thread object
-	FEventThread* eventThread = nullptr;
+	FPurposeEvaluationThread* eventThread = nullptr;
 	///Container for the background running eventThread
 	FRunnableThread* currentEventThread = nullptr;
 
 	///Container for the background task selection thread object
-	FActorThread* actorThread = nullptr;
+	FPurposeEvaluationThread* actorThread = nullptr;
 	///Container for the background running actorThread
 	FRunnableThread* currentActorThread = nullptr;
 
-	FEventThread* GetEventThread()
+	FPurposeEvaluationThread* GetEventThread()
 	{
 		if (stopThreads)
 		{
@@ -173,7 +121,7 @@ private:
 		return nullptr;
 	}
 
-	FActorThread* GetActorThread()
+	FPurposeEvaluationThread* GetActorThread()
 	{
 		if (stopThreads)
 		{
@@ -188,18 +136,23 @@ private:
 		return nullptr;
 	}
 
+	TArray<FPurposeEvaluationThread*> GetPurposeEvaluationThreads()
+	{
+		return TArray<FPurposeEvaluationThread*>({ eventThread, actorThread });
+	}
+
 	///Initialize background threads for Purpose Evaluation
 	void Init()
 	{
 		////Global::Log(Debug, Purpose, *this, "Init", TEXT("Creating Event thread."));
-		eventThread = new FEventThread(ObjectiveQueue, GoalQueue, OccurrenceQueue);
+		eventThread = new FPurposeEvaluationThread(eventCacheForPurposeSystem, candidateCacheForPurposeThread);
 		eventThread->stopThread = false;
-		currentEventThread = FRunnableThread::Create(eventThread, TEXT("Event Thread"));
+		currentEventThread = FRunnableThread::Create(eventThread, TEXT("PrimaryPurposeThread"));
 
 		////Global::Log(Debug, Purpose, *this, "Init", TEXT("Creating Actor thread."));
-		actorThread = new FActorThread(ReactionQueue, TasksQueue);
+		actorThread = new FPurposeEvaluationThread(eventCacheForPurposeSystem, candidateCacheForPurposeThread);
 		actorThread->stopThread = false;
-		currentActorThread = FRunnableThread::Create(actorThread, TEXT("Actor Thread"));
+		currentActorThread = FRunnableThread::Create(actorThread, TEXT("SecondaryPurposeThread"));
 	}
 
 	///Shutdown background threads for Purpose Evaluation
@@ -263,4 +216,55 @@ private:
 
 #pragma endregion
 
+#pragma region Management
+public:
+
+	/// Level Director will seek out spawners
+	/// When found, will create Managers
+	/// Managers will then spawn in relevant AI
+	void InitiateManagement();
+
+	void AddNewPlayer(TObjectPtr<class APlayerController> newPlayer) { players.Add(newPlayer); }
+
+protected:
+
+	UPROPERTY()
+	TArray<FAISpawnEntry> SpawnCache;
+
+	UPROPERTY()
+	TArray<TObjectPtr<class UPurposeAbilityComponent>> candidateCacheForPurposeThread;
+
+	UPROPERTY()
+	TArray<TObjectPtr<class APlayerController>> players;
+
+	/// When a Director is created for a level, they must seek out AI Spawners
+	/// Then they can create Managers to populate the level with AI actors
+	/// These Spawners+Managers are cached
+	/// Caching will allow Director to monitor AI population, spawn timing, etc.
+	void LocateSpawnsInLevel();
+
+	/// Level Director will iterate over known spawners, checking whether their AI spawn conditions have been met
+	/// @return bool: True if the spawn conditions of the spawnEntry are met
+	bool CheckAISpawnConditions(const FAISpawnEntry& spawnEntry);
+
+	/// Managers periodically will poll for EQS sight perceptions
+	/// Super:: implementation determines if the EQS can be performed this tick
+	virtual bool PerformVisualEQS();
+
+	void QueryFinished(TSharedPtr<struct FEnvQueryResult> Result, class APlayerController* inPlayer);
+
+	TObjectPtr<class UPurposeAbilityComponent> GetPurposeComponentFromPlayerController(class APlayerController* inPlayer);
+
+	FGameTime timeSinceLastEQS;
+
+	UPROPERTY(EditAnywhere, Category="Management");
+	float timeBetweenEQSQueries = 0.25f;
+
+	UPROPERTY(BlueprintReadOnly, EditAnywhere)
+	/// This EQS query is the method by which we establish player sight occurrences
+	TObjectPtr<class UEnvQuery> PlayerSightQuery = nullptr;
+
+#pragma endregion
+
 };
+
