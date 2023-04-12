@@ -1,3 +1,5 @@
+Feel free to use/modify and add to your commercial project without express permission, but I do not consent to any paid distribution of this software on its own.
+
 # Purpose-System
 The branch of the Purpose System repository represents my revised logical framework for a video game AI behavior selection system.
 
