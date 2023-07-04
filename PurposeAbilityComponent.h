@@ -14,7 +14,7 @@ UCLASS()
 /// The purpose ability component is a marriage of the UGameplayAbilitySystem with the Purpose System
 /// As a component it can be added to any actor and the management can keep track of that actor (for purpose system) via this component
 /// </summary>
-class UPurposeAbilityComponent : public ULyraAbilitySystemComponent, public IDataMapInterface, public IPurposeManagementInterface
+class LYRAGAME_API UPurposeAbilityComponent : public ULyraAbilitySystemComponent, public IDataMapInterface
 {
 	GENERATED_BODY()
 public:
@@ -22,14 +22,12 @@ public:
 	UPurposeAbilityComponent(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
 
 	/// Enforces necessity for providing reqs to PurposeSystem
-	void InitializePurposeSystem(TObjectPtr<class AManager> inManager);
-
-	TObjectPtr<class AManager> Manager() { return manager; }
+	void InitializePurposeSystem(TObjectPtr<class ADirector_Level> inDirector, TArray<FPurposeEvaluationThread*> backgroundThreads);
 	
-	bool HasCurrentObjective() { return currentObjectiveForOwner.ContextIsValid(); }
+	bool HasCurrentBehavior() { return currentBehaviorForOwner.ContextIsValid(); }
 
-	FContextData& CurrentObjective() { return currentObjectiveForOwner; }
-	void SetCurrentObjective(FContextData inContext) { currentObjectiveForOwner = inContext; }
+	FContextData& CurrentBehavior() { return currentBehaviorForOwner; }
+	void SetCurrentBehavior(FContextData inContext) { currentBehaviorForOwner = inContext; }
 
 	//TObjectPtr<ACharacter> GetOwnerCharacter() { return Cast<ACharacter>(GetOwner()); }
 	TObjectPtr<ACharacter> GetOwnerCharacter() { return Cast<ACharacter>(Cast<AController>(GetOwner())->GetPawn()); }
@@ -42,13 +40,22 @@ public:
 
 protected:
 
-	TObjectPtr<class AManager> manager = nullptr;
-
-	FContextData currentObjectiveForOwner;
+	FContextData currentBehaviorForOwner;
 
 #pragma region Datamap Interface
 public:
 
+	const TArray<FDataMapEntry>& DataMap() final { return data; }
+	TArray<FDataMapEntry> DataMapCopy() final { return data; }
+
+	UFUNCTION(Server, Reliable)
+	void AddData(UDataChunk* inData, bool overwriteValue = true) final;
+
+	UFUNCTION(Server, Reliable)
+	void AppendData(const TArray<FDataMapEntry>& inDataMap, bool overwriteValue = true) final;
+
+	UFUNCTION(Server, Reliable)
+	void RemoveData(TSubclassOf<UDataChunk> inClass) final;
 
 private:
 
@@ -146,60 +153,13 @@ protected:
 
 #pragma endregion
 
-#pragma region Purpose Owner Interface
-public:
-
-	/// Used in order to reference up the management chain to the owner of Events and Backgrounds threads
-	TScriptInterface<IPurposeManagementInterface> GetHeadOfPurposeManagment() final;
-
-	/// @return TScriptInterface<IPurposeManagementInterface>: Returns the immediate purpose manager above caller
-	TScriptInterface<IPurposeManagementInterface> GetPurposeSuperior() final;
-
-	TArray<FPurposeEvaluationThread*> GetBackgroundPurposeThreads() final;
-
-	TArray<TScriptInterface<IDataMapInterface>> GetCandidatesForSubPurposeSelection(const int PurposeLayerForUniqueSubjects) final;
-
-	/// @param PurposeLayerForUniqueSubjects: Represents the purpose layer for which the PurposeOwner is meant to create new FUniqueSubjectMaps
-	/// @param parentContext:
-	/// @param candidate: This is the primary subject that will be combined with other subjects as needed for purpose selection
-	/// @return TArray<FSubjectMap>: Each entry is a combination of the candidate and whatever other subjects required for the subpurpose indicated by addressOfSubPurpose
-	TArray<FSubjectMap> GetUniqueSubjectsRequiredForSubPurposeSelection(const int PurposeLayerForUniqueSubjects, const FContextData& parentContext, TScriptInterface<IDataMapInterface> candidate, FPurposeAddress addressOfSubPurpose) final;
-
-	bool ProvidePurposeToOwner(const FContextData& purposeToStore) final;
-
-	/// Events must be stored globally for the duration of a game so that they may have a consistent PurposeAddress
-	TArray<FPurpose> GetEventAssets() final;
-
-	/// As FPurpose can not hold an variable or TArray<> of itself, we're forced to workaround simply accessing subpurposes
-	TArray<FPurpose> GetSubPurposesFor(FPurposeAddress address) final;
-
-	/// When a purpose is put up for selection, but it appears to be a duplicate of a current purpose, we want to let the purpose owner handle the reoccurrence
-	void PurposeReOccurrence(const FPurposeAddress addressOfPurpose, const int64 uniqueIDofActivePurpose) final;
-
-	/// @param uniqueIdentifierOfContextTree: This ID unique to a series of context datas starting with Event allows separation of same purposes for different contexts
-	/// @param fullAddress: Tying the address to the unique ID is how we can search stored contexts for the relevant context we seek
-	/// @param layerToRetrieveFor: We may not necessarily wish to find the end address of the fullAddress, so we can indicate a layer to seek out
-	/// @return FContextData&: Need to check for validity as the context data may not have been found and an empty struct returned
-	FContextData& GetStoredPurpose(const int64 uniqueIdentifierOfContextTree, const FPurposeAddress& fullAddress, const int layerToRetrieveFor) override;
-
-	/// @param parentAddress: An address which is either that of a purpose containing behaviors so that it may reference the parent, or the parent address itself
-	/// @param TArray<TObjectPtr<UGA_Behavior>>: All the behaviors contained by the parent indicated
-	TArray<TObjectPtr<class UBehavior_AI>> GetBehaviorsFromParent(const FPurposeAddress& parentAddress) override { return GetHeadOfPurposeManagment()->GetBehaviorsFromParent(parentAddress); }
-
-	/// @param parentAddress: An address of the behavior containing purpose
-	/// @param TObjectPtr<UGA_Behavior>: The behavior contained by the address provided
-	TObjectPtr<class UBehavior_AI> GetBehaviorAtAddress(const FPurposeAddress& inAddress) final { return GetHeadOfPurposeManagment()->GetBehaviorAtAddress(inAddress); }
-
-	///@return bool: True when the target and candidate are the same
-	bool DoesPurposeAlreadyExist(const FContextData& primary, const FSubjectMap& secondarySubjects, const TArray<FDataMapEntry>& secondaryContext, const FPurposeAddress optionalAddress = FPurposeAddress()) final;
-
-#pragma endregion
 
 #pragma region Purpose
+public:
 
-	bool ObjectivesAreSimilar(const FContextData& primary, const FContextData& secondary);
+	bool ProvidePurposeToOwner(const FContextData& purposeToStore);
 
-	void EndCurrentObjective();
+	void EndCurrentBehavior();
 
 	/// For instances when GA activation can not be routed through the manager, this method is bound to the inActor's AbilityActivationCallbacks
 	/// Shouldn't need to unbind, as the existence of inActor (which owns the delegate this method is bound to) is dependent on this manager, who will outlive the component
@@ -210,18 +170,15 @@ public:
 	/// Manager will begin evaluation of state of Purpose Chain
 	void AbilityHasFinished(const FContextData& inContext, const EAbilityPurposeFeedback reasonAbilityEnded);
 
-	/// @return EPurposeState::Complete if parent ObjectiveContext->CompletionCriteria indicate completion
-	EPurposeState EvaluateObjectiveStatus(const FContextData& contextOfObjective);
+	/// If an AI finishes an ability and an Occurrence has not provided them a suitable behavior, we want an explicit backup occurrence in order to find a new behavior
+	void SeekNewBehavior();
 
-	/// @return EPurposeState::Complete if all required ObjectiveContext->CompletionCriteria belonging to Goal indicate completion
-	EPurposeState EvaluateGoalStatus(const FContextData& inContext);
+private:
 
-	/// Compile all objectives from existing goals of Manager for selection
-	void SelectNewObjectiveFromExistingGoals();
+	///Without a reference to the background threads we can't send an Occurrence
+	TArray<FPurposeEvaluationThread*> cacheOfBackgroundThreads;
 
-	/// Select a ability from inActor's current objective
-	void NewAbilityFromCurrentObjective();
-
+	TWeakObjectPtr<class ADirector_Level> director = nullptr;
 
 #pragma endregion
 };

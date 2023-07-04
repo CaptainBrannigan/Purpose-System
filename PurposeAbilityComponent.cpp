@@ -26,6 +26,7 @@
 #include "Purpose/Abilities/GA_PurposeBase.h"
 #include "Purpose/Assets/EventAsset.h"
 #include "Purpose/DataChunks/ActorAction.h"
+#include "Purpose/Director_Level.h"
 
 UPurposeAbilityComponent::UPurposeAbilityComponent(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -33,9 +34,11 @@ UPurposeAbilityComponent::UPurposeAbilityComponent(const FObjectInitializer& Obj
 	Global::Log(CALLTRACEESSENTIAL, PURPOSE, *this, "UPurposeAbilityComponent", TEXT("Owner: %s"), GetOwner() ?  *GetOwner()->GetName() : TEXT("Invalid"));
 }
 
-void UPurposeAbilityComponent::InitializePurposeSystem(TObjectPtr<AManager> inManager)
+void UPurposeAbilityComponent::InitializePurposeSystem(TObjectPtr<class ADirector_Level> inDirector, TArray<FPurposeEvaluationThread*> backgroundThreads)
 {
-	manager = inManager;
+	cacheOfBackgroundThreads = backgroundThreads;
+	director = inDirector;
+
 
 	AbilityActivatedCallbacks.AddUObject(this, &UPurposeAbilityComponent::ActionPerformed);/// Primarily set up since player input goes straight to the ability system
 	/// But now all behavior occurrences are routed through BehaviorPerformed
@@ -47,6 +50,31 @@ void UPurposeAbilityComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProper
 	/// Here we list the variables we want to replicate + a condition if wanted
 	DOREPLIFETIME(UPurposeAbilityComponent, data);
 }
+
+#pragma region Datamap Interface
+
+void UPurposeAbilityComponent::AddData_Implementation(UDataChunk* inData, bool overwriteValue)
+{
+	AddDataLocal(*inData, overwriteValue);
+}
+
+void UPurposeAbilityComponent::AppendData_Implementation(const TArray<FDataMapEntry>& inDataMap, bool overwriteValue)
+{
+	AppendDataLocal(inDataMap, overwriteValue);
+}
+
+void UPurposeAbilityComponent::RemoveData_Implementation(TSubclassOf<UDataChunk> inClass)
+{
+	RemoveDataLocal(inClass);
+}
+
+#pragma endregion
+
+/// BugWatch: AI Purpose PerformAbility; If an AI reaches a point where their Activity purpose ends, and they have no other Activity behaviors to perform
+	/// They may just stand there helplessly
+	/// Or they may bounce back and forth between unintended Behaviors
+		/// If that happens too quickly, exiting the game may force an !IsRooted assertion from PurposeThread as too many ASyncAbilities are going in and out to clean up on shutdown
+
 
 void UPurposeAbilityComponent::PerformAbility(const FContextData& inContext, TSubclassOf<UGA_PurposeBase> abilityClass)
 {
@@ -268,208 +296,88 @@ FGameplayAbilitySpec UPurposeAbilityComponent::GiveAbilityDuplicate(FGameplayAbi
 	return OwnedSpec;
 }
 
-#pragma region Purpose Management Interface
-
-TScriptInterface<IPurposeManagementInterface> UPurposeAbilityComponent::GetHeadOfPurposeManagment()
-{
-	return Cast<IPurposeManagementInterface>(manager)->GetHeadOfPurposeManagment();
-}
-
-TScriptInterface<IPurposeManagementInterface> UPurposeAbilityComponent::GetPurposeSuperior()
-{
-	return TScriptInterface<IPurposeManagementInterface>(manager);
-}
-
-TArray<FPurposeEvaluationThread*> UPurposeAbilityComponent::GetBackgroundPurposeThreads()
-{
-	return GetHeadOfPurposeManagment()->GetBackgroundPurposeThreads();
-}
-
-TArray<TScriptInterface<IDataMapInterface>> UPurposeAbilityComponent::GetCandidatesForSubPurposeSelection(const int PurposeLayerForUniqueSubjects)
-{
-	TArray<TScriptInterface<IDataMapInterface>> candidates;
-
-	Global::Log(DATADEBUG, PURPOSE, *this, "GetCandidatesForSubPurposeSelection", TEXT("Seeking candidates for layer %s.")
-		, *Global::EnumValueOnly<EPurposeLayer>(PurposeLayerForUniqueSubjects)
-	);
-	switch (PurposeLayerForUniqueSubjects)
-	{
-		case (int)EPurposeLayer::Behavior:
-			candidates.Add(this);
-			break;
-	}
-
-	return candidates;
-}
-
-TArray<FSubjectMap> UPurposeAbilityComponent::GetUniqueSubjectsRequiredForSubPurposeSelection(const int PurposeLayerForUniqueSubjects, const FContextData& parentContext, TScriptInterface<IDataMapInterface> candidate, FPurposeAddress addressOfSubPurpose)
-{
-	TArray<FSubjectMap> uniqueSubjects;
-
-	if (!IsValid(candidate.GetObject()))
-	{
-		Global::LogError(PURPOSE, *this, "GetUniqueSubjectsRequiredForSubPurposeSelection", TEXT("Candidate for layer %s is invalid!.")
-			, *Global::EnumValueOnly<EPurposeLayer>(PurposeLayerForUniqueSubjects)
-		);
-		return uniqueSubjects;
-	}
-
-	switch (PurposeLayerForUniqueSubjects)
-	{
-		case (int)EPurposeLayer::Behavior:
-			FSubjectMap subjectMap;
-			subjectMap.subjects.Add(ESubject::Candidate, candidate);
-			Global::LogError(PURPOSE, *this, "GetUniqueSubjectsRequiredForSubPurposeSelection", TEXT("Adding candidate %s for layer %s.")
-				, *candidate.GetObject()->GetName()
-				, *Global::EnumValueOnly<EPurposeLayer>(PurposeLayerForUniqueSubjects)
-			);
-			uniqueSubjects.Add(subjectMap);
-			/// At purpose evaluation, it will utilize each UniqueSubject entry established here to choose the best combination
-			break;
-	}
-
-	return uniqueSubjects;
-}
+#pragma region Purpose
 
 bool UPurposeAbilityComponent::ProvidePurposeToOwner(const FContextData& purposeToStore)
 {
-	switch (purposeToStore.addressOfPurpose.GetAddressLayer())
+	Global::Log(DATAESSENTIAL, PURPOSE, *this, "ProvidePurposeToOwner", TEXT("Providing %s with Objective: %s.")
+		, *GetFullGroupName(false)
+		, *purposeToStore.purpose.descriptionOfPurpose
+	);
+
+	/// Since we already establish an existing behavior purpose score as the high score for purpose selection, do we need to check for similarity?
+		/// If anything we should only check is the behavior is the same
+	/*if (ObjectivesAreSimilar(purposeToStore, CurrentBehavior()))
 	{
-		case (int)EPurposeLayer::Objective:
-			if (CurrentObjective().ContextIsValid())
-			{
-				if (CurrentObjective().cachedScoreOfPurpose >= purposeToStore.cachedScoreOfPurpose)/// Workaround for required data causing score to be 0 for the candidate who is already performing an Objective
-				{
-					Global::Log(DATADEBUG, OBJECTIVE, *this, "ObjectiveFoundForActor", TEXT("Objective %s already active or score %f is lower than current score %f for %s.")
-						, *purposeToStore.GetPurposeChainName()
-						, purposeToStore.cachedScoreOfPurpose
-						, CurrentObjective().cachedScoreOfPurpose
-						, *GetFullGroupName(false)
-					);
-					return false;
-				}
-				else
-				{
-					Global::Log(DATATRIVIAL, OBJECTIVE, *this, "ObjectiveFoundForActor", TEXT("Current Objective %s with ScoreCache %f. Incoming score %f for %s.")
-						, *purposeToStore.GetPurposeChainName()
-						, purposeToStore.cachedScoreOfPurpose
-						, CurrentObjective().cachedScoreOfPurpose
-						, *GetFullGroupName(false)
-					);
-				}
-			}
-
-			Global::Log(DATAESSENTIAL, OBJECTIVE, *this, "ProvidePurposeToOwner", TEXT("Providing %s with Objective: %s.")
-				, *GetFullGroupName(false)
-				, *purposeToStore.GetPurposeChainName()
-			);
-
-			EndCurrentObjective();/// Explicitly pass the previous Objective, to ensure avoiding any chance of ending new Objective
-
-			SetCurrentObjective(purposeToStore);///Set the current objective of the actor
-			return true;
-		break;
-		case (int)EPurposeLayer::Behavior:
-
-			TObjectPtr<UBehavior_AI> behavior = GetBehaviorAtAddress(purposeToStore.addressOfPurpose);
-
-			PerformAbility(purposeToStore, behavior, 1);
-			return true;
-		break;
-	}
-}
-
-TArray<FPurpose> UPurposeAbilityComponent::GetEventAssets()
-{
-	return GetHeadOfPurposeManagment()->GetEventAssets();
-}
-
-TArray<FPurpose> UPurposeAbilityComponent::GetSubPurposesFor(FPurposeAddress address)
-{
-	return GetHeadOfPurposeManagment()->GetSubPurposesFor(address);
-}
-
-void UPurposeAbilityComponent::PurposeReOccurrence(const FPurposeAddress addressOfPurpose, const int64 uniqueIDofActivePurpose)
-{
-}
-
-FContextData& UPurposeAbilityComponent::GetStoredPurpose(const int64 uniqueIdentifierOfContextTree, const FPurposeAddress& fullAddress, const int layerToRetrieveFor)
-{
-	switch (layerToRetrieveFor)
-	{
-		case (int)EPurposeLayer::Objective:
-
-			if (CurrentObjective().ContextIsValid() && CurrentObjective().GetContextID() == uniqueIdentifierOfContextTree && CurrentObjective().addressOfPurpose.GetAddressForLayer(layerToRetrieveFor) == fullAddress.GetAddressForLayer(layerToRetrieveFor))
-			{
-				return CurrentObjective();
-			}
-			break;
-	}
-	return GetPurposeSuperior()->GetStoredPurpose(uniqueIdentifierOfContextTree, fullAddress, layerToRetrieveFor);
-}
-
-bool UPurposeAbilityComponent::DoesPurposeAlreadyExist(const FContextData& primary, const FSubjectMap& secondarySubjects, const TArray<FDataMapEntry>& secondaryContext, const FPurposeAddress optionalAddress)
-{
-	return primary.Subject(ESubject::Candidate) == (secondarySubjects.subjects.Contains(ESubject::Candidate) ? secondarySubjects.subjects[ESubject::Candidate].GetObject() : nullptr)
-		&& primary.Subject(ESubject::ObjectiveTarget) == (secondarySubjects.subjects.Contains(ESubject::ObjectiveTarget) ? secondarySubjects.subjects[ESubject::ObjectiveTarget].GetObject() : nullptr)
-		&& primary.addressOfPurpose == optionalAddress;
-}
-
-#pragma endregion
-
-#pragma region Purpose
-
-void UPurposeAbilityComponent::EndCurrentObjective()
-{
-	if (!CurrentObjective().ContextIsValid())
-	{
-		Global::Log(DATAESSENTIAL, OBJECTIVE, *this, "{", TEXT("currentObjective for %s invalid!")
+		Global::Log(DATADEBUG, PURPOSE, *this, "ProvidePurposeToOwner", TEXT("Incoming purpose %s already being performed by %s.")
+			, *purposeToStore.GetName()
 			, *GetFullGroupName(false)
 		);
-		return;/// If the Objective is invalid, it likely means it comes from a nullptr of FActorData::currentObjective
-		/// Which is nullified when currentObjective begins clean up
+		return false;
+	}*/
+	
+	/*if 
+	(
+		purposeToStore.HasSubject(ESubject::EventTarget) && CurrentBehavior().HasSubject(ESubject::EventTarget)
+		&& purposeToStore.Subject(ESubject::EventTarget) == CurrentBehavior().Subject(ESubject::EventTarget) /// If the target
+		&& purposeToStore.purpose.behaviorAbility == CurrentBehavior().purpose.behaviorAbility)/// And the ability are both the same
+		///Then we don't want to restart behavior
+	{
+		Global::Log(DATADEBUG, PURPOSE, *this, "ProvidePurposeToOwner", TEXT("Incoming purpose %s already being performed by %s.")
+			, *purposeToStore.GetName()
+			, *GetFullGroupName(false)
+		);
+		return false;
+	}*/
+
+	EndCurrentBehavior();/// Explicitly pass the previous Objective, to ensure avoiding any chance of ending new Objective
+
+	SetCurrentBehavior(purposeToStore);///Set the current objective of the actor
+
+	PerformAbility(purposeToStore, purposeToStore.purpose.behaviorAbility, 1);
+
+	return true;
+}
+
+void UPurposeAbilityComponent::EndCurrentBehavior()
+{
+	if (!CurrentBehavior().ContextIsValid())
+	{
+		Global::Log(DATAESSENTIAL, BEHAVIOR, *this, "{", TEXT("currentBehavior for %s invalid!")
+			, *GetFullGroupName(false)
+		);
+		return;/// If the Objective is invalid, it likely means it comes from a nullptr of FActorData::currentBehavior
+		/// Which is nullified when currentBehavior begins clean up
 		/// Because AbilityFinished will be called for every Ability in the Objective, which will tell the Objective to clean up
 	}
 
-	Global::Log(DATAESSENTIAL, OBJECTIVE, *this, "EndObjective", TEXT("Ending Abilities of currentObjective %s for %s.")
-		, *CurrentObjective().GetName()
+	Global::Log(DATAESSENTIAL, BEHAVIOR, *this, "EndObjective", TEXT("Ending Abilities of currentBehavior %s for %s.")
+		, *CurrentBehavior().GetName()
 		, *GetFullGroupName(false)
 	);
 
 	/// Crucial that on finished data adjustment is made if needed
-	CurrentObjective().AdjustDataIfPossible(CurrentObjective().purpose.DataAdjustments(), EPurposeSelectionEvent::OnFinished, OBJECTIVE, "EndObjective", this);
+	CurrentBehavior().AdjustDataIfPossible(CurrentBehavior().purpose.DataAdjustments(), EPurposeSelectionEvent::OnFinished, BEHAVIOR, "EndObjective", this);
 
-	/// Decrease the address layer of the CurrentObjective in order to retrieve the Goal layer
-	FContextData& parentContext = CurrentObjective().purposeOwner->GetStoredPurpose(CurrentObjective().GetContextID(), CurrentObjective().addressOfPurpose, CurrentObjective().addressOfPurpose.GetAddressLayer() - 1);
-	if (parentContext.ContextIsValid())
+	if (CurrentBehavior().purpose.behaviorAbility)
 	{
-		/// As the Objective is finished, ensure participation is updated
-		if (!parentContext.DecreaseSubPurposeParticipants(CurrentObjective().addressOfPurpose))
-		{
-			Global::Log(DATADEBUG, PURPOSE, "PurposeSystem", "PurposeSelected", TEXT("Participation of %s not decreased!")
-				, *CurrentObjective().GetPurposeChainName()
-			);
-		}
-	}
-
-	/// tthis could be solved by going through the management intterface
-	TArray<TObjectPtr<UBehavior_AI>> behaviors = GetBehaviorsFromParent(CurrentObjective().addressOfPurpose);
-	for (TObjectPtr<UBehavior_AI>& behavior : behaviors)
-	{
-		if (!behavior)
-		{
-			continue;
-		}
-		Global::Log(DATADEBUG, OBJECTIVE, *this, "EndObjective", TEXT("Ending %s for %s.")
-			, *behavior->GetName()
+		Global::Log(DATADEBUG, PURPOSE, *this, "EndObjective", TEXT("Ending %s for %s.")
+			, *CurrentBehavior().purpose.behaviorAbility->GetName()
 			, *GetName()
 		);
-
-		EndAbilitiesOf(behavior->GetClass(), EAbilityPurposeFeedback::InterruptedForNewObjective);/// This could lead to a recursed call to AbilityFinished() without Ability()->FeedbackState()
+		EndAbilitiesOf(CurrentBehavior().purpose.behaviorAbility->GetClass(), EAbilityPurposeFeedback::InterruptedForNewObjective);/// This could lead to a recursed call to AbilityFinished() without Ability()->FeedbackState()
 		/// Bugwatch: Abilities Purpose Feedback; If abilityFeedbackState is not set in AbilityFinished() this could lead to an infinite loop of AbilityFinished() -> EndObjective() -> AbilityFinished()
 	}
+	else
+	{
 
-	SetCurrentObjective(FContextData());/// Ensure the previous objective is no longer referenced
+		Global::LogError(PURPOSE, * this, "EndObjective", TEXT("Behavior from %s for %s is invalid!")
+			, *CurrentBehavior().GetName()
+			, *GetName()
+		);
+	}
+
+	SetCurrentBehavior(FContextData());/// Ensure the previous objective is no longer referenced
 }
 
 void UPurposeAbilityComponent::ActionPerformed(UGameplayAbility* Ability)
@@ -483,18 +391,19 @@ void UPurposeAbilityComponent::ActionPerformed(UGameplayAbility* Ability)
 		FSubjectMap subjectMap;
 		TArray<FDataMapEntry> contextData;
 
+		/// So we need to solve issue with ActionPerformed somehow causing an empty purpose queued to the background thread
+			/// I bet the struct is being GC'd
+			/// Also need to solve why ability tasks are not being ended, has something to do with SequentialActions abilities. Tasks probably aren't being provided the ability correctly so they don't add to the activetasks
 		if (Ability->IsA<UGA_PurposeBase>())
 		{
 			subjectMap = Cast<UGA_PurposeBase>(Ability)->context.subjectMap;
 			contextData = Cast<UGA_PurposeBase>(Ability)->context.contextData;
 		}
-		else
-		{
-			subjectMap.subjects.Add(ESubject::Instigator, this);
-			contextData.Add(FDataMapEntry(&NewObject<UActorAction>(this)->Initialize(Ability->GetClass())));
-		}
 
-		PurposeSystem::Occurrence(subjectMap, contextData, this);
+		subjectMap.subjects.Add(ESubject::Instigator, this);
+		contextData.Add(FDataMapEntry(&NewObject<UActorAction>(this)->Initialize(Ability->GetClass())));
+
+		PurposeSystem::Occurrence(subjectMap, contextData, cacheOfBackgroundThreads);
 	}
 	else
 	{
@@ -502,178 +411,46 @@ void UPurposeAbilityComponent::ActionPerformed(UGameplayAbility* Ability)
 	}
 }
 
-
 void UPurposeAbilityComponent::AbilityHasFinished(const FContextData& inContext, const EAbilityPurposeFeedback reasonAbilityEnded)
 {
 	inContext.AdjustDataIfPossible(inContext.purpose.DataAdjustments(), EPurposeSelectionEvent::OnFinished, TASK, "ActorFinishedAbility", this);
 
 	/// Either the Ability was ended because a new Objective was selected over previous, and previous Objective's Abilities are being ended
 	/// Or we received a new Ability to perform which has OverlappingResources and is taking precedence over this Ability
-	bool shouldNotSeekNewPurpose =
+	bool bShouldNotSeekNewPurpose =
 		reasonAbilityEnded == EAbilityPurposeFeedback::InterruptedForNewObjective
 		|| reasonAbilityEnded == EAbilityPurposeFeedback::InterruptedByOverlappingResources
 		|| reasonAbilityEnded == EAbilityPurposeFeedback::InterruptedByDeath /// In this case we don't have a new purpose already selected, but character is entering death state
 		;
 
-	EPurposeState objectiveState = EPurposeState::None;
-
-	FContextData& objectiveContext = GetStoredPurpose(inContext.GetContextID(), inContext.addressOfPurpose, (int)EPurposeLayer::Objective);
-	FContextData& goalContext = GetStoredPurpose(inContext.GetContextID(), inContext.addressOfPurpose, (int)EPurposeLayer::Goal);
-
-	if (objectiveContext.ContextIsValid() && goalContext.ContextIsValid())
+	if (bShouldNotSeekNewPurpose)
 	{
-		objectiveState = EvaluateObjectiveStatus(objectiveContext);/// Evaluate the status of the objective belonging to a chain of purpose
-		goalContext.UpdateSubPurposeStatus(objectiveContext.addressOfPurpose, objectiveState);/// Ensure parent context has updated Objective status
+		return;
 	}
-	else
-	{
-		objectiveState = EPurposeState::Ongoing;/// The incoming ability context was from a reaction, so just return to current Objective for actor
-	}
-	Global::Log(DATADEBUG, TASK, *this, "ActorFinishedAbility", TEXT("Objective Status: %s. Ability Feedback State: %s")
-		, *Global::EnumValueOnly<EPurposeState>(objectiveState)
-		, *Global::EnumValueOnly<EAbilityPurposeFeedback>(reasonAbilityEnded)
-	);
 
-	switch (objectiveState)
-	{
-		case EPurposeState::Ongoing:/// Retrieve a new ability from actor's existing Objective
+	EndCurrentBehavior();///Ensure previous Objective is ending
 
-			if (shouldNotSeekNewPurpose) { return; }/// We return because we don't wish to find a new Objective or new Ability, as one or the other was already selected for inActor and that's why this Ability ended
+	/// Refactor: Purpose Behavior Finished; When ability finished, what if there isn't an occurrence which gives this AI another purpose?
+		/// Or how do we specifically seek activities?
+		/// We could create an Activity Occurrence?
+			/// Well maybe not an occurrence, but rather find most suitable activity for AI
+			/// If we did an occurrence, every AI would be polled again, which is unnecessary
 
-			if (CurrentObjective().ContextIsValid())
-			{
-				NewAbilityFromCurrentObjective();/// Valid current objective, select new ability from it
-			}
-			else
-			{
-				/// If the context has an Objective, then this actor was somehow involved and we want to ensure the data is adjusted to indicate that the Objective lost a participant
-				if (objectiveContext.ContextIsValid()) { objectiveContext.AdjustDataIfPossible(objectiveContext.purpose.DataAdjustments(), EPurposeSelectionEvent::OnFinished, OBJECTIVE, "AbilityHasFinished", this); }
-				SelectNewObjectiveFromExistingGoals();/// No valid current objective, get a new one
-			}
-			break;
-		case EPurposeState::Complete:/// If the Objective is complete, evaluate status of Goal
-			{
-				EPurposeState goalState = EvaluateGoalStatus(goalContext);
-				Global::Log(DATADEBUG, TASK, *this, "ActorFinishedAbility", TEXT("Goal Status: %s"), *Global::EnumValueOnly<EPurposeState>(goalState));
-
-				/// We don't check shouldNotSeekNewPurpose here because we want to perform GoalComplete logic if necessary
-				switch (goalState)
-				{
-					case EPurposeState::Complete:/// If the Goal was completed, notify Director, then compile objectives from remaining goals for actor to select
-
-						FContextData& eventContext = GetStoredPurpose(inContext.GetContextID(), inContext.addressOfPurpose, (int)EPurposeLayer::Event);
-
-						eventContext.UpdateSubPurposeStatus(goalContext.addressOfPurpose, goalState);/// Ensure parent context has updated Goal status
-
-						bool bAllPurposeComplete = false;
-
-						for (auto subStatus : eventContext.subPurposeStatus)
-						{
-							if (subStatus.Value != EPurposeState::Complete)
-							{
-								break;
-							}
-
-							bAllPurposeComplete = true;
-							eventContext.purposeOwner->AllSubPurposesComplete(eventContext.GetContextID(), eventContext.addressOfPurpose);
-						}
-
-						if (!bAllPurposeComplete && goalState == EPurposeState::Complete)
-						{
-							eventContext.purposeOwner->SubPurposeCompleted(goalContext.GetContextID(), goalContext.addressOfPurpose);
-						}
-
-						if (shouldNotSeekNewPurpose) { return; }/// We return because we don't wish to find a new Objective or new Ability, as one or the other was already selected for inActor and that's why this Ability ended
-
-						EndCurrentObjective();///Ensure previous Objective is ending
-
-						SelectNewObjectiveFromExistingGoals();;
-						break;
-					case EPurposeState::Ongoing:/// Else just retrieve a new Objective from current Goals for actor
-
-						if (shouldNotSeekNewPurpose) { return; }/// We return because we don't wish to find a new Objective or new Ability, as one or the other was already selected for inActor and that's why this Ability ended
-
-						EndCurrentObjective();///Ensure previous Objective is ending
-
-						SelectNewObjectiveFromExistingGoals();
-						break;
-				}
-			}
-			break;
-	}
+	SeekNewBehavior();
 }
 
-EPurposeState UPurposeAbilityComponent::EvaluateObjectiveStatus(const FContextData& contextOfObjective)
+void UPurposeAbilityComponent::SeekNewBehavior()
 {
-	EPurposeState objectiveStatus = EPurposeState::None;
-	float score = 0.0f;
-	float finalScore = 0.0f;
-
-	/// Refactor: Purpose Completion ContextData; How can we determine if a purpose is done
-		/// Previous method was a separate set of conditions
-		/// What if we used the current conditions, and possibly the score cache?
-		/// It has to be accessible from anywhere. Currently stored event assets are held on the level director
-
-	if (contextOfObjective.purpose.completionCriteria.Num() <= 0)
+	if (!director.IsValid())
 	{
-		objectiveStatus = EPurposeState::Ongoing;/// Without conditions we have no way of gauging the state of an Objective
-	}
-	else
-	{
-		for (const TObjectPtr<UCondition> condition : contextOfObjective.purpose.completionCriteria)///Score each condition and add to finalscore of purpose
-		{
-			if (!condition)
-			{
-				Global::LogError(OBJECTIVE, *this, "EvaluateObjectiveStatus", TEXT("Context->ParentPurpose->completionCriteria returned an invalid object."));
-				continue;
-			}
-			TMap<ESubject, TArray<FDataMapEntry>> subjectsWithoutPointers;
-			subjectsWithoutPointers.Add(ESubject::Context, contextOfObjective.contextData);
-			subjectsWithoutPointers.Append(contextOfObjective.subjectMap.GetSubjectsAsDataMaps());
-			score += condition->EvaluateCondition(subjectsWithoutPointers, contextOfObjective.purposeOwner, contextOfObjective.GetContextID(), contextOfObjective.addressOfPurpose);///Get a baseline 0-1 score for condition
-			////Global::Log(Debug, PurposeLog, "FPurposeEvaluationThread", "EvaluatePurpose", TEXT("Score for Condition: %s = %f; Potential Score = %f."), *condition->description.ToString(), score, potentialScore);
-		}
-
-		/// Scoring for completion criteria is meant to be more yes/no than scoring for purpose selection conditions.
-		finalScore = score / contextOfObjective.purpose.completionCriteria.Num();/// Get the average score
-
-		if (finalScore == 1) { objectiveStatus = EPurposeState::Complete; }
-		if (finalScore < 1) { objectiveStatus = EPurposeState::Ongoing; }
+		Global::LogError(MANAGEMENT, GetFullGroupName(false), "SeekNewBehavior", TEXT("Director is invalid!"));
+		return;
 	}
 
-	//Global::Log( Debug, PurposeLog, *this, "EvaluateObjectiveStatus", TEXT("Score: %f, Status: %s"), finalScore, *Global::EnumValueOnly<EPurposeState>(objectiveStatus));
+	FSubjectMap subjectsForNewBehavior;
 
-	return objectiveStatus;
-}
-
-EPurposeState UPurposeAbilityComponent::EvaluateGoalStatus(const FContextData& contextOfGoal)
-{
-	EPurposeState state = EPurposeState::Complete;
-
-	for (auto objective : contextOfGoal.subPurposeStatus)
-	{
-		if (objective.Value == EPurposeState::Ongoing)
-		{
-			state = EPurposeState::Ongoing;/// So long as a single objective is Ongoing, Goal is incomplete
-		}
-	}
-
-	return state;
-}
-
-void UPurposeAbilityComponent::SelectNewObjectiveFromExistingGoals()
-{
-	const TArray<FContextData>& goals = GetPurposeSuperior()->GetActivePurposes();
-
-	for (const FContextData& goal : goals)
-	{
-		PurposeSystem::QueueNextPurposeLayer(goal);
-	}
-}
-
-void UPurposeAbilityComponent::NewAbilityFromCurrentObjective()
-{
-	PurposeSystem::QueueNextPurposeLayer(CurrentObjective());
+	subjectsForNewBehavior.subjects.Add( ESubject::Instigator, TScriptInterface<IDataMapInterface>(director.Get()) );
+	PurposeSystem::Occurrence(TArray<TObjectPtr<UPurposeAbilityComponent>>({ this }), FSubjectMap(), TArray<FDataMapEntry>(), cacheOfBackgroundThreads);
 }
 
 #pragma endregion

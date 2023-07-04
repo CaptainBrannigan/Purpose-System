@@ -14,6 +14,8 @@
 
 #pragma region PurposeSystem
 
+class UPurposeAbilityComponent;
+
 UENUM(BlueprintType)//"BlueprintType" is essential to include
 /// Utilized by managers to determine how to handle various states of Purpose
 enum class EPurposeState : uint8
@@ -33,7 +35,7 @@ enum class EPurposeSelectionEvent : uint8
 };
 
 USTRUCT()
-struct FPurposeModificationEntry
+struct LYRAGAME_API FPurposeModificationEntry
 {
 	GENERATED_BODY()
 
@@ -56,53 +58,109 @@ struct FPurposeModificationEntry
 
 };
 
+/// Refactor: Purpose; How can we retain purpose assets while allowing instanced versions?
+	/// Can we separate the core functionality of purpose assets, which is linking a set of conditions representing a layer of purpose
+	/// So in an AI Activity, it would be convenient to have the option to directly create purpose layers without using Purpose Assets
+	/// So how do we work sequentially on a purpose hierarchy?
+		/// Occurrence happens. We gather all the Event assets 
+			/// Each asset holds a struct which contains the entire hierarchy, from Event to Behavior
+			/// We want to be able to evaluate each layer in a specific order, not necessarily within that Hierarchy
+				/// For example, Objectives have highest priority. Until all Objectives are evaluated, we do not evaluate Goals or Events.
+				/// So if each layer is the same struct, how can we differentiate for queueing? 
+					/// It would need to account for index. Perhaps we could just translate the index into a uint8?
+					/// OR we could use a TMap for the asset, and pass in only the tpair to the evaluation thread
+					/// Except we can neither use the Index nor a tmap because we want to have multiple sub purposes, so it needs to spiderweb
+					/// We could use the class of the ContextData rather than the class of the data asset
+				///So we can evaluate in order. Now in order to evaluate, we need potential purposes
+					/// Currently his is stored on the Context Data. It calls the ParentPurposeAsset->SubPurposes
+					/// What do we need?
+						/// A context data
+							/// With a unique candidate
+							/// And unique targets per unique candidate
+						/// potential purposes
+						/// The context data is created for each layer per candidate as a duplicate of the parent layer
+						/// So we want to send potential purposes, with the same context but different candidate to the background thread
+						/// And each potential purpose needs to evaluate against one another per unique target per unique candidate
+						/// So we have a concept of unique subjects for a static context data
+							/// Could we create a layered UniqueSubjects struct that we evaluate alongside the static subjects of the context data?
+							/// It could work the same was as the purpose hierarchy, where each struct has an array of sub structs
+							/// So we pass in the Conditions, Potential Purposes, Static Subjects, and Unique Subjects
+							/// So for each potential purpose ( the number of potential purposes never changes)
+								/// For each Condition (the number of conditions never changes)
+									/// For each UniqueSubject
+										/// This will need to be where recursion happens
+										/// For every UniqueSubject, it may have it's own UniqueSubjects added on
+											/// Every sub UniqueSubject creates a unique SubjectMap with the parent
+											/// So we could create an array for each SubjectMap, where each base recursive call is a unique entry, then loop through that with the StaticSubjectMap
+												/// So say we have 3 candidates with X number of potential targets
+													/// Candidate1-Target1
+													/// Candidate1-Target2
+													/// Candidate1-Target3-Subject1
+													/// Candidate1-Target3-Subject2
+														/// Evaluate for PotentialPurpose + Conditions + StaticSubjects + Each UniqueSubjectEntry
+													/// Candidate2-Target1
+														/// Evaluate for Candidate2 
+													/// Candidate3
+														/// Evaluate for Candidate3 
+										/// So for each UniqueSubject
+											///	We return an array of FSubjectMap
+											/// We then append the StaticSubjects to that, and evaluate
+											/// So the evaluation should actually work as
+												/// For each UniqueSubject
+													/// For each SubjectMap returned + StaticSubjects
+														/// For each potential purpose
+															/// Evaluate against Conditions
+													/// Then we return the SubjectMap+Purpose as the context 
+										/// Can we somehow make a "Subject Request" on a purpose?
+											/// This could allow us to no longer require unique callback functions for each type of context
+											/// As the same with the purpose hierarchy and purpose address, it could be a layered SubjectRequest
+												/// So we could make a base SubjectRequest of candidate
+													/// Then as an additional layer to tie to that SubjectRequest, we also request objectivetarget
+												/// finding the correct subjects could then be handled by a switch statement
+												/// Then these would be returned as UniqueSubject layers
+				/// When finished the ContextData is used to pass the data back
+		/// A couple miscellaneous thoughts on Purpose system
+			/// How about if only Objectives selected for an actor trigger Occurrences?
+			/// How about if ObjectiveTargets always become EventTarget
+				/// This could be handled normally for Objectives, but also by Reaction Objectives
+			/// What about ObjectiveTargeting?
+				/// This actually sort of breaks the purpose of the PurposeSystem
+				/// The purpose system is in place to provide a reactionary purpose to every action
+				/// So theoretically there should be an Objective for each actor as a target who performs an action
+				/// Which would mean each EventTarget is an ObjectiveTarget
+				/// However, this also makes it so there isn't necessarily an overarching umbrella of purpose
+					/// As in there isn't one goal in which many actors participate
+					/// In the above system it would be best to remove Goals and simply have an Objective to an Event
+					/// Which would also abandon the goal relationships unfortunately
+					/// Would also detract from an overarching sense of purpose. How would AI be doing anything other than reacting?
+					/// Which could also be another system actually. If every action is a reaction (I'm hungry so I eat), that could give more realistic sense of purpose.
+						/// Example: Event: Here's a job: AI needs purpose so they start the job. Event: Player shoots at AI; AIs need to survive is greater than it's sense of purpose so it now chooses to react to player
+
 USTRUCT(BlueprintType)
-struct FPurpose
+struct LYRAGAME_API FPurpose
 {
 	GENERATED_BODY()
 public:
 
-	UPROPERTY(EditAnywhere)
+	UPROPERTY(EditAnywhere, meta = (DisplayPriority = "0"))
 	FString descriptionOfPurpose = "";
+
+	//UPROPERTY(EditAnywhere, meta=(InlineEditConditionToggle, EditConditionHides, EditCondition = "!canEditSubPurposes"))
+	//TObjectPtr<class UBehaviorTree> BT = nullptr;
+	UPROPERTY(Instanced, EditAnywhere, meta = (DisplayPriority = "1"))
+	TObjectPtr<class UBehavior_AI> behaviorAbility = nullptr;
 
 	UPROPERTY(Instanced, EditAnywhere, meta = (TitleProperty = "Criteriia for Purpose Selection", ShowInnerProperties))
 		/// These conditions establish how a purpose fits to a context
 		/// They are critical to create legible and realistic purpose for both individual actors and groups of actors
 		/// The more conditions present, the greater the potential weight of a purpose
 	TArray<TObjectPtr<UCondition>> conditions;
-	const TArray<TObjectPtr<UCondition>> GetConditions() const { return conditions; }
-
-	UPROPERTY(Instanced, EditAnywhere, meta = (TitleProperty = "Criteria for Purpose Completion", ShowInnerProperties))
-		/// These conditions establish how a purpose can be determined as complete
-	TArray<TObjectPtr<UCondition>> completionCriteria;
-	const TArray<TObjectPtr<UCondition>> GetConditions() const { return completionCriteria; }
+	const TArray<TObjectPtr<UCondition>>& GetConditions() const { return conditions; }
 
 	UPROPERTY(EditAnywhere, meta = (TitleProperty = "description"))
 		/// These DataChunks will either be adjusted or created 
 		/// Adjustments will be determined by enum selection provided by DataChunk
 	TArray<FPurposeModificationEntry> dataAdjustmentsForPurposeEvents;
-
-	/* This is the ideal design of FPurpose, but TArray<> prevents FPurpose from referencing itself unfortunately
-	
-	/// <summary>
-	/// Having to choose to either add sub purposes or behaviors allows us to have an N number of layers, where the last layer is marked by having behaviors instead of sub purposes
-	/// </summary>
-
-	bool bCanEditSubPurposes = false;
-	//UPROPERTY(EditAnywhere, meta = (InlineEditConditionToggle, EditCondition = "!bCanEditBehavior"))
-	UPROPERTY(EditAnywhere)
-	TArray<FPurpose> subPurposes;
-
-	bool bCanEditBehavior = false;
-	///UPROPERTY(EditAnywhere, meta=(InlineEditConditionToggle, EditConditionHides, EditCondition = "!canEditSubPurposes"))
-	///TObjectPtr<class UBehaviorTree> BT = nullptr;
-	UPROPERTY(EditAnywhere, meta = (InlineEditConditionToggle, EditCondition = "!bCanEditSubPurposes"))
-		TObjectPtr<class UBehavior_AI> behaviorAbility = nullptr;
-
-	bool bRequiresTargeting = false;
-	UPROPERTY(EditAnywhere, meta = (InlineEditConditionToggle, EditCondition = "!bRequiresTargeting"))
-		TObjectPtr<class UEnvQuery> targetingQuery = nullptr;
-	*/
 
 	/// @param potentialScore = every condition with a exponential decay additional (1 + decaying additional)
 	/// @param totalWeight = The weight of each condition->weight added together
@@ -140,92 +198,7 @@ public:
 };
 
 USTRUCT(BlueprintType)
-/// For each layer of Purpose, an address layer with the index of that purpose.subPurpose is added.
-/// This works in "Event.Goal.Objective.Behavior" order as we have n number of layers by design
-/// Only the stored Event will have the whole tree of purposes however, so seeking a specific address will have to be requested by whoever stores the Event
-/// This also has to start with a globally relevant Event address. All Events need to be stored in a single location until shutdown, otherwise when one Event ends and is removed the addresses will all be incorrect
-struct FPurposeAddress
-{
-	GENERATED_BODY()
-public:
-
-	FPurposeAddress() {}
-
-	FPurposeAddress(int inAddress)
-		: address(inAddress)
-	{
-		HierarchicalAddress.Add(address);
-	}
-
-	FPurposeAddress(FPurposeAddress previousAddress, int inAddress)
-		: address(inAddress)
-		, HierarchicalAddress(previousAddress.HierarchicalAddress)
-	{
-		/// Firstly we store the previous address to retain the hierarchical structure of purpose layers
-		/// In order to have n layers of purpose, we add to the end until we no longer have a layer
-		HierarchicalAddress.Add(address);
-	}
-
-	/// 0 will mean it's at the Event layer
-	/// 1 means it's at the Goal layer
-	/// 2 Is the Objective layer
-	/// 3 is the Behavior layer
-	int GetAddressLayer() const
-	{
-		return HierarchicalAddress.Num();
-	}
-
-	int GetAddressForLayer(const int& layer) const
-	{
-		return HierarchicalAddress.IsValidIndex(layer) ? HierarchicalAddress[layer] : -1;
-	}
-
-	int GetAddressOfThisPurpose() const
-	{
-		return address;
-	}
-
-	FString GetAddressAsString() const
-	{
-		FString addressAsString = "";
-		for (int index = 0; index < HierarchicalAddress.Num(); ++index)
-		{
-			/// If the index is not at the end of the array of addresses, then add a . to separate them visually
-			addressAsString += FString::Printf(TEXT("%d%s"), HierarchicalAddress[index], index == HierarchicalAddress.Num() - 1 ? "" : ".");
-		}
-		return addressAsString;
-	}
-
-	inline bool IsValid() const { return address > -1; }
-
-private:
-
-	int address = -1;
-
-	TArray<int> HierarchicalAddress;
-
-public:
-	FORCEINLINE bool operator ==(const FPurposeAddress& otherAddress) const
-	{
-		if (otherAddress.address != address) { return false; }
-		if (otherAddress.HierarchicalAddress.Num() != HierarchicalAddress.Num()) { return false; }
-
-		for (int i = 0; i < HierarchicalAddress.Num(); ++i)
-		{
-			if (!otherAddress.HierarchicalAddress.IsValidIndex(i)) { return false; }
-			if (HierarchicalAddress[i] != otherAddress.HierarchicalAddress[i]) { return false; }
-		}
-
-		return true;
-	}
-};
-FORCEINLINE uint32 GetTypeHash(const FPurposeAddress& b)
-{
-	return FCrc::MemCrc32(&b, sizeof(FPurposeAddress));
-}
-
-USTRUCT(BlueprintType)
-struct FSubjectMap
+struct LYRAGAME_API FSubjectMap
 {
 	GENERATED_BODY()
 public:
@@ -261,10 +234,8 @@ public:
 	}
 };
 
-class IPurposeManagementInterface;
-
 USTRUCT(BlueprintType)
-struct FContextData
+struct LYRAGAME_API FContextData
 {
 	GENERATED_BODY()
 
@@ -273,21 +244,13 @@ public:
 
 	FContextData() {}
 
-	FContextData(FPurpose inPurpose, FSubjectMap inSubjectMap, TArray<FDataMapEntry> inContextData, TScriptInterface<IPurposeManagementInterface> inPurposeOwner, FPurposeAddress inAddressForPurpose, FString descriptionOfParent = "", int32 parentID = 0)
+	FContextData(FPurpose inPurpose, FSubjectMap inSubjectMap, TArray<FDataMapEntry> inContextData, TWeakObjectPtr<UPurposeAbilityComponent> inPurposeOwner)
 		: purpose(inPurpose)
 		, subjectMap(inSubjectMap)
 		, contextData(inContextData)
 		, purposeOwner(inPurposeOwner)
-		, addressOfPurpose(inAddressForPurpose)
 	{
-		contextDataPurposeName = purpose.descriptionOfPurpose + "(" + (purposeOwner.GetObject() ? purposeOwner.GetObject()->GetName() : "Invalid") + ")";
-		chainedPurposeName += descriptionOfParent.Len() > 0 ? "::" + descriptionOfParent : "";
-		
-		if (parentID == 0) /// If an existing ID is not provided, then we need to generate the initial unique ID for this context and all sub contexts
-		{
-			/// As the address of events are relevant to a single cache, each is different and thus when added to GetTicks, even if on the same Tick, will provide a different ID
-			uniqueIdentifier = addressOfPurpose.GetAddressOfThisPurpose() + FDateTime::UtcNow().GetTicks();
-		}
+		contextDataPurposeName = purpose.descriptionOfPurpose + "(" + GetOwnerName() + ")";
 	}
 
 	FPurpose purpose;
@@ -303,16 +266,14 @@ public:
 	/// We can store data specific to the context and not a subject here, such as a last known position, a type of sound heard, etc.
 	TArray<FDataMapEntry> contextData;
 
-	/// Whenever a layer of purpose is added, the address adds a layer of address
-	/// So layer 1 will have a single address entry. But layer 2 will have the main address and a sub address, and so on so forth
-	FPurposeAddress addressOfPurpose;
+	TWeakObjectPtr<UPurposeAbilityComponent> purposeOwner = nullptr;
 
-	TScriptInterface<IPurposeManagementInterface> purposeOwner = nullptr;
-
-	inline bool ContextIsValid() const { return addressOfPurpose.IsValid(); }
+	inline bool ContextIsValid() const { return purpose.GetConditions().Num() > 0; }
 
 	//inline bool HasPurpose() { return purpose.SubPurposes.Num() > 0 || purpose.BehaviorAbility; }
 	inline bool HasPurpose() const { return purpose.conditions.Num() > 0; }
+
+	FString GetOwnerName();
 
 	///@return FString: If a purpose has been found for this contextData, returns the name of the purpose itself
 	FORCEINLINE FString GetName() const
@@ -320,17 +281,9 @@ public:
 		return contextDataPurposeName;
 	}
 
-	///Construct a loop of parentContext->contextDataPurposeName until a parentContext is no longer valid
-	///Returns a name in the format of "parentContext->contextDataPurposeName::contextDataPurposeName"
-	///@return the names of all purposes up to top of chain
-	FORCEINLINE FString GetPurposeChainName() const
-	{
-		return chainedPurposeName;
-	}
-
 	FString Description() const
 	{
-		FString name = GetPurposeChainName();
+		FString name = GetName();
 		//Global::Log(DATADEBUG, PURPOSE, "FContextData", "Description", TEXT("Description of %s."), *name);
 		for (const TPair<ESubject, TScriptInterface<IDataMapInterface>>& subject : subjectMap.subjects)
 		{
@@ -385,7 +338,7 @@ public:
 			return "";
 		}///Verbosity is too high, so we don't want to log
 
-		FString name = GetPurposeChainName();
+		FString name = GetName();
 		//Global::Log(DATADEBUG, PURPOSE, "FContextData", callLocation, TEXT("Description of %s."), *name);
 		for (const TPair<ESubject, TScriptInterface<IDataMapInterface>>& subject : subjectMap.subjects)
 		{
@@ -427,76 +380,9 @@ public:
 
 	///The name adjusted to represent the selected purpose
 	FString contextDataPurposeName = "contextData";
-	///The name utilized to represent a chain of ParentContext->ChildContext
-	FString chainedPurposeName = "contextData";
-
-	const int64 GetContextID() const { return uniqueIdentifier; }
-
-	UPROPERTY()
-		/// This map links the Purpose.SubPurposes() to a "static" purpose state
-		/// It allows us to reference the completion status of a sub purpose
-		/// Which can in turn be used to determine completion status of this purpose
-		/// FTrackedPurposeEntry is the address of each individual sub purpose linked to the unique context ID for tree of purposes
-		TMap<FPurposeAddress, EPurposeState> subPurposeStatus;
-
-	UPROPERTY()
-		/// This map represents how many participants there are for sub purposes
-		/// FTrackedPurposeEntry is the address of each individual sub purpose linked to the unique context ID for tree of purposes
-		TMap<FPurposeAddress, int> subPurposeParticipants;
-
-	bool UpdateSubPurposeStatus(const FPurposeAddress& subPurpose, EPurposeState status)
-	{
-		if (subPurposeStatus.Find(subPurpose))/// If the objective class matches update the status
-		{
-			Global::Log(DATATRIVIAL, PURPOSE, GetName(), "UpdateSubPurposeStatus", TEXT("SubPurpose %s status is now."), *subPurpose.GetAddressAsString(), *Global::EnumValueOnly<EPurposeState>(status));
-			subPurposeStatus[subPurpose] = status;
-			return true;
-		}
-		else
-		{
-			Global::LogError(PURPOSE, GetName(), "UpdateSubPurposeStatus", TEXT("SubPurpose %s was not found in subPurposeStatus."), *subPurpose.GetAddressAsString());
-		}
-
-		return false;
-	}
-
-	bool IncreaseSubPurposeParticipants(const FPurposeAddress& subPurpose)
-	{
-		if (subPurposeParticipants.Find(subPurpose))/// If the objective class matches update the status
-		{
-			subPurposeParticipants[subPurpose]++;
-			Global::Log(DATATRIVIAL, PURPOSE, GetName(), "IncreaseSubPurposeParticipants", TEXT("SubPurpose %s participants now %d."), *subPurpose.GetAddressAsString(), subPurposeParticipants[subPurpose]);
-			return true;
-		}
-		else
-		{
-			Global::LogError(PURPOSE, GetName(), "IncreaseSubPurposeParticipants", TEXT("SubPurpose %s was not found in ObjectiveParticipants."), *subPurpose.GetAddressAsString());
-		}
-
-		return false;
-	}
-
-	bool DecreaseSubPurposeParticipants(const FPurposeAddress& subPurpose)
-	{
-		if (subPurposeParticipants.Find(subPurpose))/// If the objective class matches update the status
-		{
-			subPurposeParticipants[subPurpose]++;
-			Global::Log(DATATRIVIAL, PURPOSE, GetName(), "DecreaseSubPurposeParticipants", TEXT("SubPurpose %s participants now %d."), *subPurpose.GetAddressAsString(), subPurposeParticipants[subPurpose]);
-			return true;
-		}
-		else
-		{
-			Global::LogError(PURPOSE, GetName(), "DecreaseSubPurposeParticipants", TEXT("SubPurpose %s was not found in ObjectiveParticipants."), *subPurpose.GetAddressAsString());
-		}
-		return false;
-	}
 
 private:
 
-	/// This unique id is meant to provide every context data witthin a single event a unifying id
-	/// This is a means of identifying tracked purposes based on the address and this ID
-	/// We can not use address alone as a purpose may be reused multiple times for different contexts
-	int64 uniqueIdentifier = 0;
 #pragma endregion
 
 #pragma region Subjects
@@ -621,20 +507,20 @@ public:
 		return nullptr;
 	}
 
-	bool AdjustData(ESubject target, const TObjectPtr<UDataChunk>& adjustmentChunk)
+	bool AdjustData(ESubject target, const TObjectPtr<UDataChunk>& adjustmentChunk) const
 	{
-		if (IsValid(adjustmentChunk))
+		if (adjustmentChunk)
 		{
 			if (HasSubject(target))
 			{
 				if (DataMapInterfaceForSubject(target)->HasData(adjustmentChunk->GetClass()))/// If we have the data already
 				{
-					Global::Log(DATATRIVIAL, PURPOSE, GetPurposeChainName(), "AdjustData", TEXT("Adjusting %s by %d."), *adjustmentChunk->GetClass()->GetName(), (int)adjustmentChunk->DataModifier());
+					Global::Log(DATATRIVIAL, PURPOSE, GetName(), "AdjustData", TEXT("Adjusting %s by %d."), *adjustmentChunk->GetClass()->GetName(), (int)adjustmentChunk->DataModifier());
 					DataMapInterfaceForSubject(target)->DataChunk(adjustmentChunk->GetClass())->AdjustData(adjustmentChunk->DataModifier());/// Adjust the data by the specified modifier
 				}
 				else/// Otherwise create the data chunk
 				{
-					Global::Log(DATATRIVIAL, PURPOSE, GetPurposeChainName(), "AdjustData", TEXT("Creating DataChunk %s with modification %d."), *adjustmentChunk->GetClass()->GetName(), (int)adjustmentChunk->DataModifier());
+					Global::Log(DATATRIVIAL, PURPOSE, GetName(), "AdjustData", TEXT("Creating DataChunk %s with modification %d."), *adjustmentChunk->GetClass()->GetName(), (int)adjustmentChunk->DataModifier());
 					DataMapInterfaceForSubject(target)->AddData(NewObject<UDataChunk>(Subject(target), adjustmentChunk->GetClass())->AdjustData(adjustmentChunk->DataModifier()));/// And still apply the modification requested
 				}
 				return true;
@@ -647,15 +533,15 @@ public:
 				}
 				else/// Otherwise create the data chunk
 				{
-					Global::LogError(PURPOSE, GetPurposeChainName(), "AdjustData", TEXT("Cannot create DataChunk %s with modification %d for the context as we have no outer!"), *adjustmentChunk->GetClass()->GetName(), (int)adjustmentChunk->DataModifier());
+					Global::LogError(PURPOSE, GetName(), "AdjustData", TEXT("Cannot create DataChunk %s with modification %d for the context as we have no outer!"), *adjustmentChunk->GetClass()->GetName(), (int)adjustmentChunk->DataModifier());
 					//DataMapInterfaceForSubject(target)->AddData(NewObject<UDataChunk>(Get, adjustmentChunk->GetClass())->AdjustData(adjustmentChunk->DataModifier()));/// And still apply the modification requested
 				}
 				return true;
 			}
 		}
 
-		Global::LogError(PURPOSE, GetPurposeChainName(), "AdjustData", TEXT("DataAdjustment for %s and subject %s %s")
-			, *GetPurposeChainName()
+		Global::LogError(PURPOSE, GetName(), "AdjustData", TEXT("DataAdjustment for %s and subject %s %s")
+			, *GetName()
 			, *Global::EnumValueOnly<ESubject>(target)
 			, HasSubject(target) ? TEXT("has an invalid DataAdjustment chunk!") : TEXT("does not contain subject!")
 		);
@@ -675,7 +561,7 @@ public:
 		{
 			if (IsValid(chunk.dataAdjustment) && chunk.selectionEvent == inEventTypeToAdjust)
 			{
-				AdjustData(chunk.subjectToAdjust, chunk.dataAdjustment);
+				AdjustData(chunk.subjectToAdjust, chunk.dataAdjustment.Get());
 			}
 			else
 			{
@@ -683,8 +569,8 @@ public:
 				if (!IsValid(chunk.dataAdjustment))
 				{
 					source ?
-						Global::LogError(inLogCat, *source, callingMethodName, TEXT("DataAdjustment for %s has an invalid DataAdjustment chunk!"), *GetPurposeChainName())
-						: Global::LogError(inLogCat, sourceName, callingMethodName, TEXT("DataAdjustment for %s has an invalid DataAdjustment chunk!"), *GetPurposeChainName());
+						Global::LogError(inLogCat, *source, callingMethodName, TEXT("DataAdjustment for %s has an invalid DataAdjustment chunk!"), *GetName())
+						: Global::LogError(inLogCat, sourceName, callingMethodName, TEXT("DataAdjustment for %s has an invalid DataAdjustment chunk!"), *GetName());
 				}
 			}
 		}
@@ -693,92 +579,38 @@ public:
 #pragma endregion
 
 public:
-	FORCEINLINE bool operator ==(const FContextData& other) const
-	{
-		return addressOfPurpose == other.addressOfPurpose && uniqueIdentifier == other.uniqueIdentifier;
-	}
+	//FORCEINLINE bool operator ==(const FContextData& other) const
+	//{
+	//	return addressOfPurpose == other.addressOfPurpose && uniqueIdentifier == other.uniqueIdentifier;
+	//}
 };
+/*
 FORCEINLINE uint32 GetTypeHash(const FContextData& b)
 {
 	return FCrc::MemCrc32(&b, sizeof(FContextData));
-}
+}*/
 
 USTRUCT(BlueprintType)
-struct FPotentialPurposeEntry
+struct LYRAGAME_API FPotentialPurposes
 {
 	GENERATED_BODY()
 public:
 
-	FPotentialPurposeEntry() {}
-
-	FPotentialPurposeEntry(FPurpose inPurpose, FPurposeAddress inAddress, TArray<FSubjectMap> inUniqueSubjectMap)
-		: purposeToBeEvaluated(inPurpose)
-		, addressOfPurpose(inAddress)
-		, mapOfUniqueSubjectEntriesForPurpose(inUniqueSubjectMap)
-	{
-	}
-
-	/// This address is the full address, including parent address, for this purpose entry
-	FPurposeAddress addressOfPurpose;
-
-	/// This is the actual purpose that will be evaluated against the subject map established specifically for this purpose, + the static subject map from the context
-	FPurpose purposeToBeEvaluated;
-
-	/// The PotentialSubjectMaps are a combination of 1 UniqueSubject and any other entries desired
-	/// The StaticSubjectMap will be appended to the PotentialSubjectMap at evaluation, the highest scoring pair becomes the new StaticSubjectMap
-	TArray<FSubjectMap> mapOfUniqueSubjectEntriesForPurpose;
-
-};
-
-USTRUCT(BlueprintType)
-struct FPotentialPurposes
-{
-	GENERATED_BODY()
-public:
-
-	FPotentialPurposes(const FPurposeAddress parentAddress, const int64 parentID)
-		: addressOfParentPurpose(parentAddress)
-		, uniqueIdentifierOfParent(parentID)
-	{}
-
-	/// A combination of a potential purpose and the UniqueSubject entries for that specific purpose
-	TArray<FPotentialPurposeEntry> potentialPurposes;
-
-	int AddressLayer = -1;
-
-	/// We store the parent address here so that, when selected, the selected sub purpose may create their full address
-	const FPurposeAddress addressOfParentPurpose;
+	/// These are all the candidates we wish to evaluate for a new purpose against tthe provided context
+	TArray<TObjectPtr<UPurposeAbilityComponent>> candidatesForNewPurpose;
 
 	/// Subject map for the potential purposes to evaluate against
-	FSubjectMap staticSubjectMapForPotentialPurposes;
+	FSubjectMap subjectMapForPotentialPurposes;
 
 	/// This is the 1 UniqueSubject for which this FPotentialPurpose exists
-	TScriptInterface<IPurposeManagementInterface> purposeOwner = nullptr;
+	TWeakObjectPtr<UPurposeAbilityComponent> purposeOwner = nullptr;
 
 	/// Context data for the potential purposes to evaluate against
 	TArray<FDataMapEntry> ContextDataForPotentialPurposes;
-
-	FString DescriptionOfParentPurpose = "";
-
-	/// This unique id is meant to provide every context data witthin a single event a unifying id
-	/// This is a means of identifying tracked purposes based on the address and this ID
-	/// We can not use address alone as a purpose may be reused multiple times for different contexts
-	const int64 uniqueIdentifierOfParent;
-
-	void SetDescriptionOfParentPurpose(TScriptInterface<IPurposeManagementInterface > parentOwner, FString parentDescription)
-	{
-		DescriptionOfParentPurpose = FString::Printf(TEXT("%s::%s"), *parentDescription, IsValid(parentOwner.GetObject()) ? *parentOwner.GetObject()->GetName() : TEXT("Invalid"));
-	}
-
-	void SetDescriptionOfParentPurpose(const FContextData& parentContext)
-	{
-		DescriptionOfParentPurpose = parentContext.GetName();
-	}
-
 };
 
 ///Umbrella type for multiple queues of UContextData_Deprecated
-typedef TQueue<TObjectPtr<UContextData_Deprecated>> PurposeQueue;
+typedef TQueue<FPotentialPurposes> PurposeQueue;
 
 class FAsyncGraphTask_PurposeSelected;
 
@@ -796,6 +628,13 @@ class FPurposeEvaluationThread : public FRunnable
 {
 public:
 
+	FPurposeEvaluationThread(const TArray<FPurpose>& inPurposeCache, const TArray<TObjectPtr<UPurposeAbilityComponent>>& inCandidateCache)
+		: purposeCacheForBackgroundThread(inPurposeCache)
+		, candidateCache(inCandidateCache)
+	{
+
+	}
+
 	///Controls while loop execution of Run() 
 	bool stopThread = true;
 
@@ -811,26 +650,36 @@ public:
 	void Stop() final;
 	virtual void Exit() override;
 
-	/// This is reliant on how each thread is setup
-	/// Add specific keys to individual threads that you wish to separate by thread
+	///Executed so long as Init() returns true
+	///Runs Recursively to evaluate queues until thread is told to stop and/or shutdown
+	uint32 Run() override;
+
+	//void AddCandidatesToThreadCache(TArray<TObjectPtr<UPurposeAbilityComponent>> inCandidates)
+	//{
+	//	candidateCache.Append(inCandidates);
+	//}
+
 	///@return bool: True when the purpose was stored to a queue to be evaluated at some point
-	bool QueuePurpose(FPotentialPurposes potentialPurposesToQueue) 
+	bool QueuePurpose(FPotentialPurposes potentialPurposesToQueue)
 	{
-		if (potentialPurposeQueues.Contains(potentialPurposesToQueue.AddressLayer))
+		if(potentialPurposeQueue.Enqueue(potentialPurposesToQueue))
 		{
-			potentialPurposeQueues[potentialPurposesToQueue.AddressLayer].Enqueue(potentialPurposesToQueue);
+			/// Since TQueue doesn't have a .Num()
+			numQueueItems++;/// ensure this thread has an increased number of queue items
+			return true;
 		}
+
 		return false;
 	}
 
-	///@param layerToDequeue: Used to dictate which layer we wish to evaluate, allowing us to dictatet an order in which they may be dequeued and evaluated
 	/// @param dequeudPurpose; TQueue requires an out param to dequeue to
 	///@return bool: False only when a purpose was not dequeued
-	bool DequeuePurpose(uint8 layerToDequeue, FPotentialPurposes& dequeuedPurpose)
+	bool DequeuePurpose(FPotentialPurposes& dequeuedPurpose)
 	{
-		if (potentialPurposeQueues.Contains(layerToDequeue))
+		if (potentialPurposeQueue.Dequeue(dequeuedPurpose))
 		{
-			potentialPurposeQueues[layerToDequeue].Dequeue(dequeuedPurpose);
+			/// Since TQueue doesn't have a .Num()
+			numQueueItems--;/// ensure this thread has a decreased number of queue items
 			return true;
 		}
 
@@ -841,214 +690,139 @@ public:
 	///@return bool: 
 	bool SelectPurposeIfPossible(FPotentialPurposes& purposeToEvaluate);
 
+	const TArray<FPurpose>& GetPurposeCacheForBackgroundThread() const { return purposeCacheForBackgroundThread; }
+	const TArray<TObjectPtr<UPurposeAbilityComponent>>& GetCandidateCache() const { return candidateCache; }
+
+	const int GetNumQueuedPurposes() { return numQueueItems; }
 protected:
+	const TArray<FPurpose>& purposeCacheForBackgroundThread;
 
-	TMap<uint8, TQueue<FPotentialPurposes>> potentialPurposeQueues;
+	const TArray<TObjectPtr<UPurposeAbilityComponent>>& candidateCache;
 
-	bool CreateAsyncTask_PurposeSelected(FContextData& context);
-	bool FPurposeEvaluationThread::CreateAsyncTask_ReOccurrence(TScriptInterface<class IPurposeManagementInterface> owner, const FPurposeAddress addressOfPurpose, const int64 outUniqueIDofActivePurpose);
+	PurposeQueue potentialPurposeQueue;
 
-};
+	/// TQueues do not have a .Num() to track how many queued items
+	/// We can track the number of queued items so that if we want to have multiple threads we can simply compare queue to the thread with less items
+	int numQueueItems = 0;
 
-UINTERFACE(BlueprintType)
-class UPurposeManagmentInterface : public UInterface
-{
-	GENERATED_BODY()
+	bool CreateAsyncTask_PurposeSelected(FContextData context);
 
-};
-
-/// <summary>
-/// This interface is a means for providing the Purpose system with everything it requires that it cannot initialize itself
-/// </summary>
-class IPurposeManagementInterface
-{
-	GENERATED_BODY()
-public:
-
-	/// Used in order to reference up the management chain to the owner of Events and Backgrounds threads
-	virtual TScriptInterface<IPurposeManagementInterface> GetHeadOfPurposeManagment() = 0;
-
-	/// @return TScriptInterface<IPurposeManagementInterface>: Returns the immediate purpose manager above caller
-	virtual TScriptInterface<IPurposeManagementInterface> GetPurposeSuperior() = 0;
-
-	virtual TArray<FPurposeEvaluationThread*> GetBackgroundPurposeThreads() = 0;
-
-	/// @return TArray<TScriptInterface<IDataMapInterface>>: Every candidate we wish to select a purpose for
-	virtual TArray<TScriptInterface<IDataMapInterface>> GetCandidatesForSubPurposeSelection(const int PurposeLayerForUniqueSubjects) = 0;
-
-	/// @param PurposeLayerForUniqueSubjects: Represents the purpose layer for which the PurposeOwner is meant to create new FUniqueSubjectMaps
-	/// @param parentContext:
-	/// @param candidate: This is the primary subject that will be combined with other subjects as needed for purpose selection
-	/// @return TArray<FSubjectMap>: Each entry is a combination of the candidate and whatever other subjects required for the subpurpose indicated by addressOfSubPurpose
-	virtual TArray<FSubjectMap> GetUniqueSubjectsRequiredForSubPurposeSelection(const int PurposeLayerForUniqueSubjects, const FContextData& parentContext, TScriptInterface<IDataMapInterface> candidate, FPurposeAddress addressOfSubPurpose) = 0;
-
-	virtual bool ProvidePurposeToOwner(const FContextData& purposeToStore) = 0;
-
-	/// Events must be stored globally for the duration of a game so that they may have a consistent PurposeAddress
-	virtual TArray<FPurpose> GetEventAssets() = 0;
-
-	/// As FPurpose can not hold an variable or TArray<> of itself, we're forced to workaround simply accessing subpurposes
-	virtual TArray<FPurpose> GetSubPurposesFor(FPurposeAddress address) = 0;
-
-	virtual const TArray<FContextData>& GetActivePurposes() = 0;
-
-	/// When a purpose is put up for selection, but it appears to be a duplicate of a current purpose, we want to let the purpose owner handle the reoccurrence
-	virtual void PurposeReOccurrence(const FPurposeAddress addressOfPurpose, const int64 uniqueIDofActivePurpose) = 0;
-
-	/// @param uniqueIdentifierOfContextTree: This ID unique to a series of context datas starting with Event allows separation of same purposes for different contexts
-	/// @param fullAddress: Tying the address to the unique ID is how we can search stored contexts for the relevant context we seek
-	/// @param layerToRetrieveFor: We may not necessarily wish to find the end address of the fullAddress, so we can indicate a layer to seek out
-	/// @return FContextData&: Need to check for validity as the context data may not have been found and an empty struct returned
-	virtual FContextData& GetStoredPurpose(const int64 uniqueIdentifierOfContextTree, const FPurposeAddress& fullAddress, const int layerToRetrieveFor) = 0;
-
-	/// @param parentAddress: An address which is either that of a purpose containing behaviors so that it may reference the parent, or the parent address itself
-	/// @param TArray<TObjectPtr<UGA_Behavior>>: All the behaviors contained by the parent indicated
-	virtual TArray<TObjectPtr<class UBehavior_AI>> GetBehaviorsFromParent(const FPurposeAddress& parentAddress) = 0;
-
-	/// @param parentAddress: An address of the behavior containing purpose
-	/// @param TObjectPtr<UGA_Behavior>: The behavior contained by the address provided
-	virtual TObjectPtr<class UBehavior_AI> GetBehaviorAtAddress(const FPurposeAddress& inAddress) = 0;
-
-	///@return bool: Determined by the implementer
-	virtual bool DoesPurposeAlreadyExist(const FContextData& primary, const FSubjectMap& secondarySubjects, const TArray<FDataMapEntry>& secondaryContext, const FPurposeAddress optionalAddress = FPurposeAddress()) = 0;
-
-	virtual void SubPurposeCompleted(const int64& uniqueContextID, const FPurposeAddress& addressOfPurpose) = 0;
-
-	virtual void AllSubPurposesComplete(const int64& uniqueContextID, const FPurposeAddress& addressOfPurpose) = 0;
 };
 
 namespace PurposeSystem
 {
 
-	static bool QueuePurposeToBackgroundThread(FPotentialPurposes potentialPurposes, TArray<FPurposeEvaluationThread*> potentialThreadsToQueueOn)
+	static bool QueuePurposeToBackgroundThread(FPotentialPurposes potentialPurposes, FPurposeEvaluationThread& backgroundThread)
 	{
-		/// Since we have a queue purpose on the background threads which queue based on a switch statement for the address level
-			/// We can simply have them return a bool for whether the potentialpurpose was queued or not
-			/// If not, then try the next background thread until we either get a positive queue or have to destroy the potential purpose
-
-		for (FPurposeEvaluationThread* thread : potentialThreadsToQueueOn)
+		if (backgroundThread.QueuePurpose(potentialPurposes))
 		{
-			if (thread->QueuePurpose(potentialPurposes))
-			{
-				return true;
-				break;
-			}
+			return true;
 		}
 		/// If the potential purposes were not queued they will simply be GCd;
 		return false;
 	}
 
-	static bool Occurrence(FSubjectMap subjectsOfContext, TArray<FDataMapEntry> context, TScriptInterface<IPurposeManagementInterface> purposeOwner)
+	static bool Occurrence(FSubjectMap subjectsOfContext, TArray<FDataMapEntry> context, const TArray<FPurposeEvaluationThread*>& backgroundThreads)
 	{
-		if (!IsValid(purposeOwner.GetObject()) && IsValid(purposeOwner->GetHeadOfPurposeManagment().GetObject()))
+		FPurposeEvaluationThread* selectedThread = nullptr;
+		int leastNumQueuedPurposes = 0;
+		for (FPurposeEvaluationThread* thread : backgroundThreads)
 		{
-			Global::LogError(EVENT, "PurposeSystem", "Occurrence", TEXT("Provided an invalid PurposeOwner or Purpose Superior!"));
-			return false;
-		}
-
-		/// We utilize the head of the purpose management system as they are responsible for storing all event assets as well as Event contexts
-		TScriptInterface<IPurposeManagementInterface> headOfPurposeManagement = purposeOwner->GetHeadOfPurposeManagment();
-
-		/// Before we even bother with potential purposes for an occurrence, let's make sure it doesn't already exist
-		for (const FContextData& eventContext : headOfPurposeManagement->GetActivePurposes())
-		{
-			if (headOfPurposeManagement->DoesPurposeAlreadyExist(eventContext, subjectsOfContext, context))
+			if (!thread)
 			{
-				Global::Log( DATATRIVIAL, EVENT, "PurposeSystem", "Occurrence", TEXT("Provided an invalid Occurrence already exists!"));
-				return false;
-				break;
+				continue;
+			}
+			if (thread->GetPurposeCacheForBackgroundThread().Num() < 1)
+			{
+				Global::LogError(EVENT, "PurposeSystem", "Occurrence", TEXT("No Event Assets stored on background thread!"));
+				continue;
+			}
+
+			if (thread->GetCandidateCache().Num() < 1)
+			{
+				Global::LogError(EVENT, "PurposeSystem", "Occurrence", TEXT("No Event Assets stored on background thread!"));
+				continue;
+			}
+
+			if (thread->GetNumQueuedPurposes() <= leastNumQueuedPurposes)
+			{
+				leastNumQueuedPurposes = thread->GetNumQueuedPurposes();
+				selectedThread = thread;
 			}
 		}
 
-		if (headOfPurposeManagement->GetEventAssets().Num() < 1)
+		if (!selectedThread)
 		{
-			Global::LogError(EVENT, "PurposeSystem", "Occurrence", TEXT("No Event Assets!"));
+			Global::LogError(EVENT, "PurposeSystem", "Occurrence", TEXT("Selected background thread is invalid!!"));
 			return false;
 		}
 
-		FPotentialPurposes potentialPurposes(FPurposeAddress(), 0);/// We can not initialize the potential purposes with parent data as we are at the initial purpose step
-		potentialPurposes.AddressLayer = (int)EPurposeLayer::Event;/// As this is an Occurrence we have to initialize which Purpose Layer this will be evaluated for
-		potentialPurposes.purposeOwner = headOfPurposeManagement;
+		FPurposeEvaluationThread& backgroundThread = *selectedThread;
 
-		TArray<FPurpose> events = potentialPurposes.purposeOwner->GetEventAssets();
-		TArray<TScriptInterface<IDataMapInterface>> candidates = potentialPurposes.purposeOwner->GetCandidatesForSubPurposeSelection(potentialPurposes.AddressLayer);
-		TArray<FSubjectMap> subjects;
-		for (auto candidate : candidates)/// At least 1 entry is required as the purpose evaluation works on a for loop
-		{
-			subjects.Append(potentialPurposes.purposeOwner->GetUniqueSubjectsRequiredForSubPurposeSelection(potentialPurposes.AddressLayer, FContextData(), candidate, FPurposeAddress()));
-		}
+		FPotentialPurposes potentialPurposes;
 
-		TArray<FPotentialPurposeEntry> entries;
+		potentialPurposes.candidatesForNewPurpose = backgroundThread.GetCandidateCache();
 
-		for (int i = 0; i < events.Num(); ++i)
-		{
-			/// As this is the first layer of purpose, we can't provide a previous purpose address, so we simply set the address to the index of the cached EventAssets
-			FPotentialPurposeEntry entry(events[i], FPurposeAddress(i), subjects);
-
-			entries.Add(entry);
-		}
-
-		potentialPurposes.potentialPurposes = entries;
-		potentialPurposes.staticSubjectMapForPotentialPurposes = subjectsOfContext;
+		potentialPurposes.subjectMapForPotentialPurposes = subjectsOfContext;
 		potentialPurposes.ContextDataForPotentialPurposes = context;
 
 		/// Queue the subjects, context, and potential purposes to background thread
 		/// At this time, we don't bother with UniqueSubjects for Occurrences, as Conditions for Events are revolving strictly around the context of the Occurrence
-		return PurposeSystem::QueuePurposeToBackgroundThread(potentialPurposes, potentialPurposes.purposeOwner->GetBackgroundPurposeThreads());
+		return PurposeSystem::QueuePurposeToBackgroundThread(potentialPurposes, backgroundThread);
 	}
-
-	static void QueueNextPurposeLayer(const FContextData& contextToParentPurpose)
+	
+	static bool Occurrence(const TArray<TObjectPtr<UPurposeAbilityComponent>>& inCandidates, FSubjectMap subjectsOfContext, TArray<FDataMapEntry> context, const TArray<FPurposeEvaluationThread*>& backgroundThreads)
 	{
-		int nextPurposeLayer = contextToParentPurpose.addressOfPurpose.GetAddressLayer() + 1;/// Because we are now evaluating sub purposes, we raise the address layer so the background thread is aware 
-		
-		TArray<FPurpose> potentialPurposesForEvaluation = contextToParentPurpose.purposeOwner->GetSubPurposesFor(contextToParentPurpose.addressOfPurpose);
-		TArray<TScriptInterface<IDataMapInterface>> candidates = contextToParentPurpose.purposeOwner->GetCandidatesForSubPurposeSelection(nextPurposeLayer);
-
-		/// For every candidate, we establish a FPotentialPurposes
-			/// Which contains not only the sub purpose of the contextOfParentPurpose, but also a subject map relevant specifically to that sub purpose
-		for (TScriptInterface<IDataMapInterface> candidate : candidates)
+		FPurposeEvaluationThread* selectedThread = nullptr;
+		int leastNumQueuedPurposes = 0;
+		for (FPurposeEvaluationThread* thread : backgroundThreads)
 		{
-			FPotentialPurposes potentialPurposes(
-				contextToParentPurpose.addressOfPurpose/// By providing the potential purposes the parent address, the one selected is then able to append it's own address to create the full address
-				, contextToParentPurpose.GetContextID()/// By providing the sub contexts with the ID generated by the base context data we have a unique identifier for all contexts in this tree
-			);
-			//potentialPurposes.addressOfParentPurpose = contextToParentPurpose.addressOfPurpose;
-			//potentialPurposes.uniqueIdentifierOfParent = contextToParentPurpose.GetContextID();
-			potentialPurposes.AddressLayer = nextPurposeLayer;/// Importantly we use the nextPurposeLayer, as we a queuing for sub purposes now
-			potentialPurposes.purposeOwner = TScriptInterface<IPurposeManagementInterface>(candidate.GetObject());/// The candidate, who is being evaluated for a potential purpose, is stored as the purpose owner so the purpose is returned to them
-
-			if (!IsValid(potentialPurposes.purposeOwner.GetObject()))
+			if (!thread)
 			{
-				Global::LogError(PURPOSE, "PurposeSystem", "QueueNextPurposeLayer", TEXT("Candidate returned is invalid or does not implement IPurposeManagementInterface! Parent context: %s.")
-					, *contextToParentPurpose.GetPurposeChainName()
-				);
+				continue;
+			}
+			if (thread->GetPurposeCacheForBackgroundThread().Num() < 1)
+			{
+				Global::LogError(EVENT, "PurposeSystem", "Occurrence", TEXT("No Event Assets stored on background thread!"));
 				continue;
 			}
 
-			TArray<FPotentialPurposeEntry> purposeEntries;
-			/// Now we need to establish unique subject entries, based off the candidate, for each individual potential purpose
-			for ( int i = 0; i < potentialPurposesForEvaluation.Num(); ++i)
+			if (thread->GetCandidateCache().Num() < 1)
 			{
-				FPurpose& purpose = potentialPurposesForEvaluation[i];
-				FPurposeAddress purposeAddress(contextToParentPurpose.addressOfPurpose, i);/// VERY IMPORTANT, this is how the sub purpose address is established, and is a huge aspect of the PurposeSystem
-
-				/// Each UniqueSubject entry is a combination of the candidate + any other relevant subject to this purpose, such as a target
-				TArray<FSubjectMap> UniqueSubjects = contextToParentPurpose.purposeOwner->GetUniqueSubjectsRequiredForSubPurposeSelection(nextPurposeLayer, contextToParentPurpose, candidate, purposeAddress);
-				FPotentialPurposeEntry entry(purpose, purposeAddress, UniqueSubjects);
-				purposeEntries.Add(entry);
+				Global::LogError(EVENT, "PurposeSystem", "Occurrence", TEXT("No Candidates stored on background thread!"));
+				continue;
 			}
 
-			potentialPurposes.potentialPurposes = purposeEntries;
-
-			potentialPurposes.staticSubjectMapForPotentialPurposes = contextToParentPurpose.subjectMap;/// We separate the static and potential subject maps to avoid duplicating the static SubjectMap per UniqueSubject enry
-			potentialPurposes.ContextDataForPotentialPurposes = contextToParentPurpose.contextData;/// The Context subject, but it's static data that once added to context does not change, plus we can't store it as a TScriptInterface<IDataMapInterface>
-			/// So we're forced to keep it separate
-
-			potentialPurposes.SetDescriptionOfParentPurpose(contextToParentPurpose);/// For our own debug sanity, it's nice have a description and setting up a chain or purpose descriptions with their owner
-
-			/// Queue the subjects, context, and potential purposes to background thread
-			PurposeSystem::QueuePurposeToBackgroundThread(potentialPurposes, contextToParentPurpose.purposeOwner->GetBackgroundPurposeThreads());
+			if (thread->GetNumQueuedPurposes() <= leastNumQueuedPurposes)
+			{
+				leastNumQueuedPurposes = thread->GetNumQueuedPurposes();
+				selectedThread = thread;
+			}
 		}
+
+		if (!selectedThread)
+		{
+			Global::LogError(EVENT, "PurposeSystem", "Occurrence", TEXT("No valid background thread was selected!"));
+			return false;
+		}
+
+		FPurposeEvaluationThread& backgroundThread = *selectedThread;
+
+		FPotentialPurposes potentialPurposes;
+
+		potentialPurposes.candidatesForNewPurpose = inCandidates;
+
+		potentialPurposes.subjectMapForPotentialPurposes = subjectsOfContext;
+		potentialPurposes.ContextDataForPotentialPurposes = context;
+
+		/// Queue the subjects, context, and potential purposes to background thread
+		/// At this time, we don't bother with UniqueSubjects for Occurrences, as Conditions for Events are revolving strictly around the context of the Occurrence
+		return PurposeSystem::QueuePurposeToBackgroundThread(potentialPurposes, backgroundThread);
+	}
+
+	namespace Private
+	{
+		bool AttemptToPassSelectedPurposeToOwner(const FContextData& selectedPurpose);
 	}
 
 	/// The background thread has found a purpose
@@ -1057,48 +831,29 @@ namespace PurposeSystem
 	/// Then it attempts to get the next layer of purpose
 	static void PurposeSelected(FContextData contextOfSelectedPurpose)
 	{
-		if (!IsValid(contextOfSelectedPurpose.purposeOwner.GetObject()))
+		if (!contextOfSelectedPurpose.purposeOwner.IsValid())
 		{
 			Global::LogError(EVENT, "PurposeSystem", "PurposeSelected", TEXT("Provided an invalid PurposeOwner!"));
 			return;
 		}
 
-		bool purposeAccepted = contextOfSelectedPurpose.purposeOwner->ProvidePurposeToOwner(contextOfSelectedPurpose);
+		/// Refactor: Purpose Evaluation; We can't call back to purpose ability component from here
+			/// So how can we get the context back to the purpose component?
+				/// Easiest solution is to just move this to the cpp, but that's sloppy design
+				/// We need a way to call an occurrence on ability start, and a way to return a purpose to the ability component
+		bool purposeAccepted = PurposeSystem::Private::AttemptToPassSelectedPurposeToOwner(contextOfSelectedPurpose);
 
 		if (!purposeAccepted)
 		{
 			Global::Log(DATADEBUG, PURPOSE, "PurposeSystem", "PurposeSelected", TEXT("Purpose Owner %s did not accept the provided purpose: %s!")
-				, *contextOfSelectedPurpose.purposeOwner.GetObject()->GetName()
-				, *contextOfSelectedPurpose.GetPurposeChainName()
+				, *contextOfSelectedPurpose.GetOwnerName()
+				, *contextOfSelectedPurpose.GetName()
 			);
 
 			return;
 		}
 
 		contextOfSelectedPurpose.AdjustDataIfPossible(contextOfSelectedPurpose.purpose.DataAdjustments(), EPurposeSelectionEvent::OnSelected, PURPOSE, "PurposeSelected", nullptr, "PurposeSystem");
-
-		bool bSubParticipantsIncreased = false;
-
-		FContextData& parentContext = contextOfSelectedPurpose.purposeOwner->GetStoredPurpose(contextOfSelectedPurpose.GetContextID(), contextOfSelectedPurpose.addressOfPurpose, contextOfSelectedPurpose.addressOfPurpose.GetAddressLayer() - 1);
-		if (parentContext.ContextIsValid())
-		{
-			/// Given a parent purpose, we need to ensure that sub purposes are tracked
-			/// They only need to be added once though, as they are already stored within a context
-			parentContext.subPurposeParticipants.FindOrAdd(contextOfSelectedPurpose.addressOfPurpose, 0);
-			parentContext.subPurposeStatus.FindOrAdd(contextOfSelectedPurpose.addressOfPurpose, EPurposeState::Ongoing);
-
-			bSubParticipantsIncreased = parentContext.IncreaseSubPurposeParticipants(contextOfSelectedPurpose.addressOfPurpose);
-		}
-
-		if (!bSubParticipantsIncreased)/// If the participants were not increased it was because the address or parent context was not found 
-		{
-			Global::Log(DATADEBUG, PURPOSE, "PurposeSystem", "PurposeSelected", TEXT("%s for %s.")
-				, parentContext.ContextIsValid() ? TEXT("Parent Context did not increase participants") : TEXT("Parent Context was not found")
-				, *contextOfSelectedPurpose.GetPurposeChainName()
-			);
-		}
-
-		PurposeSystem::QueueNextPurposeLayer(contextOfSelectedPurpose);
 	}
 
 }
@@ -1115,34 +870,10 @@ class FEventThread : public FPurposeEvaluationThread
 {
 public:
 
-	FEventThread(PurposeQueue& Objective, PurposeQueue& Event, PurposeQueue& Occurrence)
-		: ObjectiveQueue(Objective),
-		GoalQueue(Event),
-		OccurrenceQueue(Occurrence)
-	{
-	}
-
 	~FEventThread();
-
-	///Executed so long as Init() returns true
-	///Runs Recursively to evaluate queues until thread is told to stop and/or shutdown
-	uint32 Run() override;
-
-	///Recurse through queues until all are emptied via DestroyData()
-	void Exit() override;
 
 protected:
 
-	///This queue exists because actors need to be able to score an objective per target
-	///Previous setup was to add all those targets to an individual UContextData_Deprecated, else they wouldn't compare against each other 
-	///Also so that we don't have to waste memory with multiple objects
-	PurposeQueue& ObjectiveQueue;
-
-	/// The Event queue serves to distribute the goals of an event to the appropriate managers
-	PurposeQueue& GoalQueue;
-
-	/// The Occurrence Queue serves to match an incoming context to an Event to begin a chain of purpose
-	PurposeQueue& OccurrenceQueue;
 };
 
 /// <summary>
@@ -1154,30 +885,9 @@ class FActorThread : public FPurposeEvaluationThread
 {
 public:
 
-	FActorThread(PurposeQueue& Reaction, PurposeQueue& Task)
-		: ReactionQueue(Reaction),
-		TasksQueue(Task)
-	{
-	}
-
 	~FActorThread();
 
-	///Executed so long as Init() returns true
-	///Runs Recursively to evaluate queues until thread is told to stop and/or shutdown
-	uint32 Run() final;
 
-	///Recurse through queues until all are emptied via DestroyData()
-	void Exit() final;
-
-protected:
-
-	///The Reaction queue holds contexts requiring an immediate objective to a direct action against an actor
-	///This queue is the highest priority queue on the ActorThread
-	PurposeQueue& ReactionQueue;
-
-	/// The Tasks queue is responsible for finding a Task for Actors provided an Objective
-	/// As it is likely in constant evaluation, it should be lowest priority of ActorThread
-	PurposeQueue& TasksQueue;
 
 };
 
@@ -1188,132 +898,12 @@ protected:
 class FCompanionThread : public FEventThread
 {
 public:
-
-	FCompanionThread(PurposeQueue& Occurrence, PurposeQueue& Goal, PurposeQueue& Objective, PurposeQueue& Task)
-		: FEventThread(Occurrence, Goal, Objective),
-		TaskQueue(Task)
-	{
-	}
-
 	~FCompanionThread();
 
-	///Executed so long as Init() returns true
-	///Runs Recursively to evaluate queues until thread is told to stop and/or shutdown
-	uint32 Run() final;
-
-	///Recurse through queues until all are emptied via DestroyData()
-	void Exit() final;
-
-protected:
-
-	/// Queue selecting most appropriate action of behavior selected for companion
-	PurposeQueue& TaskQueue;
 
 };
 
 #pragma region TGraphTasks
-
-
-/// <summary>
-/// Data cannot be removed from the rootset via background thread
-/// Pass it back to the gamethread on a fire and forget task to be removed from root and sweeped up by GC
-/// </summary>
-class FAsyncGraphTask_DestroyData
-{
-	TObjectPtr<UContextData_Deprecated> contextData;
-	FString reasonForDeletion = "";
-
-public:
-	FAsyncGraphTask_DestroyData(TObjectPtr<UContextData_Deprecated> inContext, FString reason = "")
-		: contextData(inContext),
-		reasonForDeletion(reason)
-	{
-	}
-
-	~FAsyncGraphTask_DestroyData()
-	{
-//		//Global::Log(EHierarchicalCalltraceVerbosity::DEBUG, "FAsyncGraphTask_DestroyData", "~FAsyncGraphTask_PurposeSelected", TEXT(""));
-		if (IsValid(contextData)) { contextData->RemoveFromRoot(); }
-	}
-
-	FORCEINLINE TStatId GetStatId() const { RETURN_QUICK_DECLARE_CYCLE_STAT(FAsyncGraphTask_DestroyData, STATGROUP_TaskGraphTasks); }
-	static FORCEINLINE ENamedThreads::Type GetDesiredThread() { return ENamedThreads::GameThread; }
-	static FORCEINLINE ESubsequentsMode::Type GetSubsequentsMode() { return ESubsequentsMode::FireAndForget; }
-
-	void DoTask(ENamedThreads::Type CurrentThread, const FGraphEventRef& MyCompletionGraphEvent)
-	{
-//		//Global::Log(EHierarchicalCalltraceVerbosity::DEBUG, "FAsyncGraphTask_DestroyData", "DoTask", TEXT(""));
-
-		if (IsValid(contextData))
-		{
-			if (reasonForDeletion.IsEmpty())
-			{
-				//Global::Log(Debug, PurposeLog, "FAsyncGraphTask_DestroyData", "DoTask", TEXT("Destroying %s"), *contextData->GetPurposeChainName());
-			}
-			else
-			{
-				//Global::Log(Debug, PurposeLog, "FAsyncGraphTask_DestroyData", "DoTask", TEXT("Destroying %s; %s"), *contextData->GetPurposeChainName(), *reasonForDeletion);
-			}
-			contextData->RemoveFromRoot();
-			contextData->MarkAsGarbage();
-		}
-		else
-		{
-			//Global::Log(Debug, PurposeLog, "FAsyncGraphTask_DestroyData", "DoTask", TEXT("Context Data was not valid"));
-		}
-	}
-};
-
-/// <summary>
-/// ASyncGraphTask_ReOccurrence is used to notify a Level Director that an Event should have its Candidates reevaluate the Objectives of that Event
-/// </summary>
-class FAsyncGraphTask_ReOccurrence
-{
-protected:
-	int indexOfEvent = -1;
-	TWeakObjectPtr<class ADirector_Level> levelDirector = nullptr;
-	FPurposeEvaluationThread& callingThread;///Used to detect stopThread
-	bool shouldAbandon = false;
-
-public:
-	FAsyncGraphTask_ReOccurrence(int inEventIndex, TWeakObjectPtr<class ADirector_Level> inLevelDirector, FPurposeEvaluationThread& inCallingThread)
-		: indexOfEvent(inEventIndex),
-		levelDirector(inLevelDirector),
-		callingThread(inCallingThread)
-	{
-//		callingThread.reOccurrenceTasks.Add(this);
-	}
-
-	virtual ~FAsyncGraphTask_ReOccurrence()
-	{
-//		//Global::Log(EHierarchicalCalltraceVerbosity::DEBUG, "FAsyncGraphTask_PurposeSelected", "~FAsyncGraphTask_PurposeSelected", TEXT(""));
-//		callingThread.reOccurrenceTasks.Remove(this);
-	}
-
-	FORCEINLINE TStatId GetStatId() const { RETURN_QUICK_DECLARE_CYCLE_STAT(FAsyncGraphTask_ReOccurrence, STATGROUP_TaskGraphTasks); }
-	static FORCEINLINE ENamedThreads::Type GetDesiredThread() { return ENamedThreads::GameThread; }
-	static FORCEINLINE ESubsequentsMode::Type GetSubsequentsMode() { return ESubsequentsMode::FireAndForget; }
-
-	void DoTask(ENamedThreads::Type CurrentThread, const FGraphEventRef& MyCompletionGraphEvent)
-	{
-//		//Global::Log(EHierarchicalCalltraceVerbosity::DEBUG, "FAsyncGraphTask_PurposeSelected", "DoTask", TEXT(""));
-
-		shouldAbandon ? Cancel() : ReOccurrence();
-	}
-
-	void ReOccurrence();
-
-	/// Can be called by any thread in order to ensure that the purpose chain halts
-	/// When the task attempts to DoTask(), it will instead cancel
-	void Abandon() { shouldAbandon = true; }
-
-protected:
-	void Cancel()
-	{
-//		//Global::Log(EHierarchicalCalltraceVerbosity::DEBUG, "FAsyncGraphTask_PurposeSelected", "Cancel", TEXT(""));
-	}
-
-};
 
 /// <summary>
 /// ASyncGraphTask_PurposeSelected is utilized by the background thread to send a ContextData with a purpose back to the gamethread
